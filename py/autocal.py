@@ -13,12 +13,17 @@ import astroscrappy
 import math
 import subprocess
 import os
+import glob
 import sys
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 from astropy.io import fits
-
+from astropy import wcs
+from astropy.table import Table
+from scipy.spatial import cKDTree
+import to_precision as tp
+import pandas as pd
 
 sexpath = ''  # if "sex" works in any directory, leave blank
 
@@ -26,7 +31,7 @@ defaulttolerance = 0.01  # these defaults should generally not be altered.
 defaultpatolerance = 1.4   
 defaultminfwhm = 1.5
 defaultmaxfwhm = 40
-
+defaultelliptol = 0.2
 fastmatch = 1
 showmatches = 0
 
@@ -86,7 +91,7 @@ def writeconfigfile(satlevel=55000.):
     MAG_ZEROPOINT    0.0            # magnitude zero-point
     MAG_GAMMA        4.0            # gamma of emulsion (for photographic scans)
     GAIN             0.0            # detector gain in e-/ADU
-    PIXEL_SCALE      1.0            # size of pixel in arcsec (0=use FITS WCS info)
+    PIXEL_SCALE      0            # size of pixel in arcsec (0=use FITS WCS info)
 
     #------------------------- Star/Galaxy Separation ----------------------------
 
@@ -199,7 +204,7 @@ class SexObj(Obj):
 def writetextfile(filename, objlist):
     out = open(filename,'w')
     for ob in objlist:
-      out.write("%11.7f %11.7f %5.2f\n" % (ob.ra, ob.dec, ob.mag))
+      out.write("%11.7f %11.7f %5.2f %5.2f %5.2f %5.2f\n" % (ob.ra, ob.dec, ob.mag, ob.magerr, ob.cat_mag, ob.cat_magerr))
     out.close()
 
 
@@ -212,16 +217,16 @@ def writeregionfile(filename, objlist, color="green",sys=''):
       out.write('fk5\n')
       for ob in objlist:
         i += 1
-        out.write("point(%.7f,%.7f) # point=boxcircle text={%i}\n" % (ob.ra, ob.dec, i))
+        out.write("point(%.7f,%.7f) # point=boxcircle text={%.2f +- %0.2f}\n" % (ob.ra, ob.dec, ob.cat_mag, ob.cat_magerr))
     if sys == 'img':
       out.write('image\n')
       for ob in objlist:
         i += 1
-        out.write("point(%.3f,%.3f) # point=boxcircle text={%i}\n" % (ob.x, ob.y, i))
+        out.write("point(%.3f,%.3f) # point=boxcircle text={%.2f +- %0.2f}\n" % (ob.x, ob.y, ob.cat_mag, ob.cat_magerr))
     out.close()
 
 
-def sextract(sexfilename, nxpix, nypix, border=3, corner=12, minfwhm=1.5, maxfwhm=25, maxellip=0.5, saturation=-1):
+def sextract(sexfilename, nxpix, nypix, border=3, corner=12, minfwhm=1.5, maxfwhm=25, maxellip=0.5, saturation=-1, zeropoint=0):
 
     if maxellip == -1: maxellip = 0.5
     if saturation > 0:
@@ -231,7 +236,7 @@ def sextract(sexfilename, nxpix, nypix, border=3, corner=12, minfwhm=1.5, maxfwh
 
     try:
        # Sextract the image !
-       os.system(sexpath + "sex " + sexfilename + " -c sex.config -SATUR_LEVEL "+str(sexsaturation))
+       subprocess.run(['sex', '%s'%sexfilename, '-c', 'sex.config', '-SATUR_LEVEL', '%s'%sexsaturation, '-MAG_ZEROPOINT', '%s'%zeropoint])
     except (OSError, IOError):
        logger.warn("Sextractor failed to be executed.", exc_info=1)
        sys.exit(1)
@@ -357,16 +362,6 @@ def sextract(sexfilename, nxpix, nypix, border=3, corner=12, minfwhm=1.5, maxfwh
     else:
        fwhmmode = minfwhm
        fwhm20 = minfwhm
-    #hifwhmlist = []
-    #for f in fwhmlist:
-    #   if f > fwhmmode*1.5: hifwhmlist.append(f)
-    #fwhmhimode = mode(hifwhmlist)
-
- #   ellipmode = mode(elliplist)   # in theory, if this is large we could use a theta cut, too.  (THETA_IMAGE)
- #   ellipstdev = stdev(elliplist)
- #   elliptol = 1.0 #min(0.25, 2.5*ellipstdev)
-             # this effectively disables the ellipticity filter.
-
 
     # formerly a max, but occasionally a preponderance of long CR's could cause fwhmmode to be bigger than the stars
     refinedminfwhm = np.median([0.75*fwhmmode,0.9*fwhm20,minfwhm]) # if CR's are bigger and more common than stars, this is dangerous...
@@ -377,136 +372,342 @@ def sextract(sexfilename, nxpix, nypix, border=3, corner=12, minfwhm=1.5, maxfwh
     ngood = 0
     goodsexlist = []
     for sex in sexlist:
-       if sex.fwhm > refinedminfwhm: # and sex.ellip < ellipmode +elliptol:
+       if sex.fwhm > refinedminfwhm and sex.ellip < maxellip:
           goodsexlist.append(sex)
           ngood += 1
 
-    # i = 0
-    # for sex in goodsexlist:
-    #      if i < 1000: print(i, sex.mag, sex.fwhm)
-    #      i += 1
-
-    writetextfile('det.init.txt', goodsexlist)
-    writeregionfile('det.im.reg', goodsexlist, 'red', 'img')
-
     print(len(sexlist), 'objects detected in image ('+ str(len(sexlist)-len(goodsexlist)) +' discarded)')
-
 
     return goodsexlist
 
 
-def get_catalog(img_ra, img_dec, img_filt, radius = 1, catalog = "PS"):
+def get_catalog(img_ra, img_dec, img_filt, radius = 5, catalog = "PS"):
 
-  gr_cat_arg = "python gr_cat.py -c %s%s -r %s -s %s -b %s -f temp_cat.dat"%(img_ra, img_dec, radius, catalog, img_filt)
+  gr_cat_arg = [sys.executable, 'gr_cat.py', '-c', '%s%s'%(img_ra, img_dec), '-r', '%s'%radius, '-s', '%s'%catalog, '-b', '%s'%img_filt, '-f', 'temp_cat.dat', '-d', 'temp_cat.reg']
 
   # Run gr_cat_arg to get catalog around ra and dec
   try:
-      os.system(gr_cat_arg)
+      subprocess.run(gr_cat_arg)
   except (OSError, IOError):
       logger.warn("gr_cat.py failed to be executed.", exc_info=1)
 
   # Read in the catalog
   try:
-      cat = np.genfromtxt("temp_cat.dat")
+      cat = pd.read_csv("temp_cat.dat").values
   except (OSError, IOError):
       logger.warn("Cannot load catalog file!", exc_info=1)
   # Check for exsistence of targets
   if cat.shape[0] == 0:
       logger.warn("Catalog is empty: try a different catalog?", exc_info=1)
       sys.exit(1)
-
   return cat
 
 
+def run_astrometry_net(img_name, img_ra, img_dec):
+    # Shell command to run astrometry-net
+    astrometry_args = ['solve-field', '-g', '-p', '-O', '--fits-image', '%s'%(img_name), '--ra', '%s'%img_ra, '--dec', '%s'%img_dec, '--radius', '%s'%(1/60)]
+
+    # Run astrometry-net on field
+    try:
+       subprocess.run(astrometry_args)
+    except (OSError, IOError):
+      logger.warn("astrometry-net failed to be executed.", exc_info=1)
+
+    # Read in the calibrated image
+    calib_img_name = img_name.replace("temp", "new")
+    try:
+        calib_img_name = img_name.replace("temp", "new")
+        calib_img = fits.open(calib_img_name)
+        img_name = calib_img_name
+    except (OSError, IOError):
+        # logger.warn("Astrometry solution did not solve! Continuing without astrometric calibration.", exc_info=1)
+        logger.warn("Astrometry solution did not solve! Continuing without astrometric calibration.")
+
+    return img_name
+
+
+def joint_catalog(cat_1, cat_2):
+    """
+    Small function to match to arrays based on the first two columns, which is assumed to be ra and dec
+    """
+    # Grow the tree
+    tree_data = np.array([cat_1[:, 0], cat_1[:, 1]]).T
+    tree = cKDTree(tree_data)
+
+    # Find mapping indices
+    idx_map_cat2, idx_map_cat1 = [], []
+    tol = 1e-3 # Distance in degrees - This could change depending on the accuracy of the astrometric solution
+    for ii, kk in enumerate(cat_2):
+        # find the k nearest neighbours
+        distance, indice = tree.query(kk[0:2], k=1)
+        if distance < tol:
+            # Store
+            idx_map_cat1.append(indice)
+            idx_map_cat2.append(ii)
+
+    cat_1 = cat_1[np.array(idx_map_cat1)]
+    cat_2 = cat_2[np.array(idx_map_cat2)]
+    # Return joint lists
+    return cat_1, cat_2
 
 def main():
     """
-    Rutine to automatically do astrometric calibration and photometry of detected sources. Uses astrometry.net to correct the astrometric solution of the image. This correction includes image distortions. Queries  Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Sextractor is run on the astrometrically calibrated image using the function sextract, written by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. Handling of the entire sextractor interfacing is heavily based on autoastrometry.py The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog. 
+    Rutine to automatically do astrometric calibration and photometry of detected sources. Uses astrometry.net to correct the astrometric solution of the image. Input images need to be larger than ~10 arcmin for this to work. This correction includes image distortions. Queries  Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Sextractor is run on the astrometrically calibrated image using the function sextract, heavily inspired by autoastrometry.py by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. Handling of the entire sextractor interfacing is heavily based on autoastrometry.py. The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog.
     """
 
-    filename = "../test_data/XSHOO.2016-10-18T00:09:56.640.fits"
+    filename = "../test_data/FORS_R_OB_ana.fits"
+    # filename = "../test_data/XSHOO.2016-10-30T00_17_52.558.fits"
     fitsfile = fits.open(filename)
     header = fitsfile[0].header
-    img_filt = header["HIERARCH ESO INS FILT1 NAME"][0]
-
     img_ra, img_dec = header["RA"], header["DEC"]
 
-
-    cat = get_catalog(img_ra, img_dec, img_filt)
-
-    writeparfile()
-    saturation = -1
-    if not os.path.exists('sex.config'): writeconfigfile(saturation)
-
-
-    #Read the header info from the file for sextractor
-    try:
-        # no longer drawing RA and DEC from here.
-        key = 'NAXIS1'
-        nxpix = header[key]
-        key = 'NAXIS2'
-        nypix = header[key]
-    except:
-        logger.warn("Cannot find necessary WCS header keyword.", exc_info=1)
-        sys.exit(1)
-    try:
-        key = 'CRVAL1'
-        cra =  float(header[key])
-        key = 'CRVAL2'
-        cdec = float(header[key])
-
-        key = 'CRPIX1'
-        crpix1 = float(header[key])
-        key = 'CRPIX2'
-        crpix2 = float(header[key])
-
-        key = 'CD1_1'
-        cd11 = float(header[key])
-        key = 'CD2_2'
-        cd22 = float(header[key])
-        key = 'CD1_2'
-        cd12 = float(header[key]) # deg / pix
-        key = 'CD2_1'
-        cd21 = float(header[key])
-
-        equinox = float(header.get('EQUINOX', 2000.))
-        if abs(equinox-2000.) > 0.2: print('Warning: EQUINOX is not 2000.0')
-    except:
-        if pixelscale == -1:
-            print('Cannot find necessary WCS header keyword', key)
-            logger.warn("Must specify pixel scale (-px VAL) or provide provisional basic WCS info via CD matrix.", exc_info=1)
-            #Some images might use CROT parameters, could try to be compatible with this too...?
-            sys.exit(1)
-    seeing = -1
-    if (seeing == -1):
-        minfwhm = defaultminfwhm #1.5
-        maxfwhm = defaultmaxfwhm #40
-    else:
-        minfwhm = 0.7 * seeing
-        maxfwhm = 2 * seeing
-    maxellip = -1
-
-    gain = fitsfile[0].header['HIERARCH ESO DET OUT1 GAIN']
-    ron = fitsfile[0].header['HIERARCH ESO DET OUT1 RON']
+    # temp_filename = filename
+    temp_filename = filename.replace("fits", "")+"temp"
 
     # Clean for cosmics
-    crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, cleantype='medmask', sepmed=True)
-
-    # Replace data array with cleaned image
-    fitsfile[0].data = clean_arr
-
-    # Update file
-    fitsfile.writeto(filename+"cosmicced.fits", output_verify='fix', clobber=True)
-
-    # Sextract stars to produce image star catalog
-    goodsexlist = sextract(filename+"cosmicced.fits", nxpix, nypix, 3, 12, minfwhm=minfwhm, maxfwhm=maxfwhm, maxellip=maxellip, saturation=saturation)
-
-
+    gain_key = [x for x in header.keys() if "GAIN" in x][0]
+    ron_key = [x for x in header.keys() if "RON" in x][0]
 
     try:
-       os.remove('temp\*')
+      gain = header[gain_key]
+      ron = header[ron_key]
     except:
-       print('Could not remove temp.param for some reason')
+      logger.warn("Gain and RON keys not understood. Setting to default values")
+      gain = 2
+      ron = 3.3
+    objlim = 75
+    sigclip = 50 # Put this value quite high to avoid rejecting background regions
+    crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, gain=gain, readnoise=ron, sigclip=sigclip, objlim=objlim, cleantype='medmask', sepmed=True, verbose=True)
+
+    # Replace data array with cleaned image
+    fitsfile[0].data = clean_arr/gain
+
+    # Save cosmicced file to temp
+    fitsfile.writeto(temp_filename, output_verify='fix', clobber=True)
+
+    # Attempt astrometric calibration
+    temp_filename = run_astrometry_net(temp_filename, img_ra, img_dec)
+
+    # Read in cosmic-ray rejected, possibly astrometrically calibrated image
+    fitsfile = fits.open(temp_filename)
+    header = fitsfile[0].header
+
+    # Get header keyword for catalog matching
+    try:
+      img_filt = header["HIERARCH ESO INS FILT1 NAME"][0] # image filter name
+    except KeyError:
+      try:
+        img_filt = header["FILTER"]
+      except KeyError:
+        logger.warn("Filter keyword not recognized.", exc_info=1)
+        sys.exit(1)
+
+    img_ra, img_dec = header["RA"], header["DEC"] # ra and dec
+    # Ensure sign convention for gr_cat
+    if not img_dec < 0:
+        img_dec = "+"+str(img_dec)
+
+    w = wcs.WCS(header)
+    pixscale = wcs.utils.proj_plane_pixel_scales(w)
+    nxpix = header['NAXIS1']
+    nypix = header['NAXIS2']
+
+    img_radius = np.sqrt((pixscale[0]*nxpix*60)**2 + (pixscale[1]*nypix*60)**2) # Largest image dimension to use as catalog query radius in arcmin
+
+    # query catalog - will be moved to arg
+    catalog = "PS"
+
+    # Get the catalog sources
+    if img_filt == "I":
+      # Get sdss filters for Lupton (2005) tranformations - http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php
+      cat_i = get_catalog(img_ra, img_dec, "i", catalog=catalog, radius = img_radius)
+      cat_z = get_catalog(img_ra, img_dec, "z", catalog=catalog, radius = img_radius)
+      cat_i, cat_z = joint_catalog(cat_i, cat_z) # Get joint catalog
+      # Do filter transformation
+      cat_i[:, 2] = cat_i[:, 2] - 0.3780*(cat_i[:, 2] - cat_z[:, 2]) - 0.3974
+      # Account for transformation scatter
+      cat_i[:, 3] = np.sqrt(cat_i[:, 3]**2 + 0.0063**2)
+      cat = cat_i.copy()
+    elif img_filt == "R":
+      # Get sdss filters for Lupton (2005) tranformations - http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php
+      cat_r = get_catalog(img_ra, img_dec, "r", catalog=catalog, radius = img_radius)
+      cat_i = get_catalog(img_ra, img_dec, "i", catalog=catalog, radius = img_radius)
+      cat_r, cat_i = joint_catalog(cat_r, cat_i) # Get joint catalog
+      # Do filter transformation
+      cat_r[:, 2] = cat_r[:, 2] - 0.2936*(cat_r[:, 2] - cat_i[:, 2]) - 0.1439
+      # Account for transformation scatter
+      cat_r[:, 3] = np.sqrt(cat_r[:, 3]**2 + 0.0072**2)
+      cat = cat_r.copy()
+    else:
+      cat = get_catalog(img_ra, img_dec, img_filt, catalog=catalog, radius = img_radius)
+
+    # exit()
+    # Prepare sextractor
+    writeparfile()
+    saturation = 30000
+    writeconfigfile(saturation)
+
+    # Sextract stars to produce image star catalog
+    goodsexlist = sextract(temp_filename, nxpix, nypix, border = 3, corner = 12, saturation=saturation)
+
+    # Get sextracted ra, dec list for k-d Tree algoritm
+    ra_sex, dec_sex = [], []
+    for ii in goodsexlist:
+        ra_sex.append(ii.ra)
+        dec_sex.append(ii.dec)
+
+    # Grow the tree
+    tree_data = np.array([ra_sex, dec_sex]).T
+    tree = cKDTree(tree_data)
+
+    # Find mapping indices
+    idx_map_sex, idx_map_cat = [], []
+    tol = 1e-3 # Distance in degrees - This could change depending on the accuracy of the astrometric solution
+    for ii, kk in enumerate(cat):
+        # find the k nearest neighbours
+        distance, indice = tree.query(kk[0:2], k=1)
+        # print(distance, indice)
+        if distance < tol:
+            # Store
+            idx_map_sex.append(indice)
+            idx_map_cat.append(ii)
+
+    # Add catalog photometry to sextractor object
+    for ii, kk in enumerate(idx_map_sex):
+        goodsexlist[kk].cat_mag = cat[idx_map_cat[ii]][2]
+        goodsexlist[kk].cat_magerr = cat[idx_map_cat[ii]][3]
+
+    # Bad matches from sextracted star catalog
+    idx_bad = [ii for ii in np.arange(len(goodsexlist)) if ii not in idx_map_sex]
+
+    # Remove mismatches
+    for ii, kk in enumerate(idx_bad[::-1]):
+        goodsexlist.pop(kk)
+
+    writetextfile('det.init.txt', goodsexlist)
+    writeregionfile('det.im.reg', goodsexlist, 'red', 'img')
+
+    # Get sextracted magnitudes and equivalent catalog magnitudes
+    n_good = len(goodsexlist)
+    mag, magerr, cat_mag, cat_magerr = np.zeros(n_good), np.zeros(n_good), np.zeros(n_good), np.zeros(n_good)
+    for ii, kk in enumerate(goodsexlist):
+        mag[ii] = kk.mag #+ 2.5*np.log10(exptime) # Correct for exposure time
+        magerr[ii] = kk.magerr
+        cat_mag[ii] = kk.cat_mag
+        cat_magerr[ii] = kk.cat_magerr
+
+    # Filter away 5-sigma outliers in the zero point
+    zp = cat_mag - mag
+    zp_l, zp_m, zp_h = np.percentile(zp, [16, 50, 84])
+
+    sig_l = zp_m - zp_l
+    sig_h = zp_h - zp_m
+    # Filter zp's
+    sigma_mask = 3
+    mask = (zp > zp_m - sigma_mask * sig_l) & (zp < zp_m + sigma_mask * sig_h)
+    zp = zp[mask]
+    zp_m, zp_std = np.mean(zp), np.std(zp)
+    zp_scatter = np.std(zp)
+    print(np.mean(zp), np.std(zp)/np.sqrt(len(zp)))
+    # mag = mag - np.mean(mag)
+    # cat_mag = cat_mag - np.mean(cat_mag)
+    # Fit for zero point
+    from scipy.optimize import curve_fit
+    from scipy import odr
+
+    def func(p, x):
+      b = p
+      return x + b
+
+    # Model object
+    lin_model = odr.Model(func)
+
+    # Create a RealData object
+    data = odr.RealData(mag[mask], cat_mag[mask], sx=magerr[mask], sy=cat_magerr[mask])
+
+    # Set up ODR with the model and data.
+    odr = odr.ODR(data, lin_model, beta0=[np.mean(zp)])
+
+    # Run the regression.
+    out = odr.run()
+
+    #print fit parameters and 1-sigma estimates
+    popt = out.beta
+    perr = out.sd_beta
+    print('fit parameter 1-sigma error')
+    print('———————————-')
+    for i in range(len(popt)):
+      print(str(popt[i])+' +- '+str(perr[i]))
+    zp_m, zp_std = popt[0], perr[0]
+    # prepare confidence level curves
+    nstd = 5. # to draw 5-sigma intervals
+    popt_up = popt + nstd * perr
+    popt_dw = popt - nstd * perr
+
+    x_fit = np.linspace(min(mag[mask]), max(mag[mask]), 100)
+    fit = func(popt, x_fit)
+    fit_up = func(popt_up, x_fit)
+    fit_dw= func(popt_dw, x_fit)
+
+    #plot
+    pl.errorbar(mag[mask], cat_mag[mask], xerr=magerr[mask], yerr=cat_magerr[mask], fmt = 'k.', label = str(zp_m)+' +- '+str(zp_std))
+    pl.plot(x_fit, fit, lw=2, label='best fit curve')
+    pl.fill_between(x_fit, fit_up, fit_dw, alpha=.25, label='5-sigma interval')
+    pl.legend()
+    pl.savefig(filename+".pdf")
+
+    # Add catalog photometry to sextractor object
+    for ii, kk in enumerate(goodsexlist):
+        kk.cat_mag = mag[ii] + zp_m
+        kk.cat_magerr = np.sqrt(magerr[ii]**2 + zp_std**2)
+    writeregionfile('cal.im.reg', goodsexlist, 'red', 'img')
+
+    # Get seeing fwhm for catalog object
+    fwhm = []
+    for ii in goodsexlist:
+        fwhm.append(ii.fwhm)
+    # Median seeing in arcsec for sextractor
+    seeing_fwhm = np.percentile(fwhm, [50])*pixscale[0] * 3600 # Seeing in arcsec
+
+    try:
+       # Sextract the image using the derived zero-point and fwhm!
+       subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-DETECT_THRESH', '1'])
+    except (OSError, IOError):
+       logger.warn("Sextractor failed to be executed.", exc_info=1)
+       sys.exit(1)
+
+    # Read in the sextractor catalog
+    try:
+       cat = open("temp_sex_obj.cat",'r')
+       catlines = cat.readlines()
+       cat.close()
+    except:
+        logger.warn("Cannot load sextractor output file!", exc_info=1)
+        sys.exit(1)
+
+    if len(catlines) == 0:
+        logger.warn("Sextractor catalog is empty: try a different catalog?", exc_info=1)
+        sys.exit(1)
+
+    l = -1
+    sexlist = []
+    while l < len(catlines)-1:
+        l += 1
+        if (len(catlines[l]) <= 1 or catlines[l][0] == '#'):
+            continue
+        iobj = SexObj(catlines[l]) #process the line into an object
+        sexlist.append(iobj)
+    
+    for ii, kk in enumerate(sexlist):
+        kk.cat_mag = kk.mag
+        kk.cat_magerr = np.sqrt(kk.magerr**2 + zp_std**2)
+    writeregionfile('obj.im.reg', sexlist, 'red', 'img')
+
+    try:
+        for fl in glob.glob("*temp*"):
+            os.remove(fl)
+    except:
+       print('Could not remove temp files for some reason')
 
 if __name__ == '__main__':
     main()

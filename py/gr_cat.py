@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/local/anaconda3/envs/py36 python
 
 # NOT FOR PRODUCTION USE.
 
@@ -13,10 +13,12 @@
 # 2013-07-29 kruehler Add APASS option
 # 2016-09-22 kruehler Add Gaia option
 # 2016-12-19 kruehler Add Pan-Starrs
+# 2017-08-06 Jonatan Selsing converted to Python 3
+# 2017-08-07 Adopted astroquery for web interface and astropy Table for storage
 
 """
 Retrieve  objects from SDSS or APASS (directly) or USNOA2/B1 via Vizier.
-Depends on sqlcl.py obtainable from http://cas.sdss.org/dr7/en/help/download/sqlcl/
+Depends on astropy astroquery
 Usage: grb_cat.py options
 Options:
     -c  <ra_in_deg><dec_in_deg> ra and dec coordinates in degrees
@@ -41,7 +43,11 @@ import signal
 import numpy as np
 import subprocess
 from socket import setdefaulttimeout
-
+from astroquery.vizier import Vizier
+from astroquery.sdss import SDSS
+from astropy import coordinates as coords
+import astropy.units as u
+from astropy.table import Table
 setdefaulttimeout(30)
 
 
@@ -144,49 +150,6 @@ def get_options():
     return ra, dec, rad, filename, cat, band, hawki, regionname
 
 
-def get_SDSS_runcamfield(ra,dec,release="dr12"):
-    """Retrieve run, camcol, field from SDSS."""
-    ra, dec = sexa2deg(ra, dec)
-
-    urls = [
-        'http://skyserver.sdss.org/%s/en/tools/search/x_sql.aspx' % (release),
-            'http://cas.sdss.org/dr9/en/tools/search/x_sql.asp',]
-
-    for url in urls:
-        run, camcol, field, result = '', '', '', ''
-        # Should add some basic flag checking to this query template.
-        query_template = """select p.run, p.camcol, p.field from STAR as p
-        inner join dbo.fGetNearbyObjEq(%s,%s,%s) as N on p.objid = N.objid"""
-        query = query_template % (ra, dec, 1)
-        signal.signal(signal.SIGALRM, alarm_handler)
-        signal.alarm(5)
-        try:
-            args = ['sqlcl.py', '-l', '-q', '%s' % query,
-                    '-s', '%s' % url, '-f', 'csv']
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE)
-            result = proc.stdout.readlines()
-            signal.alarm(0)
-        except Alarm:
-            pass
-        except:
-            raise RuntimeError("Could not run sqlcl.py")
-# =============================================================================
-#   Remove first entry in list if coming from skyserver query
-# =============================================================================
-        if 'run,camcol,field\n' in result:
-            result.remove('run,camcol,field\n')
-
-        if len(result) > 0:
-            try:
-                [run, camcol, field] = result[0].split(',')[0:3]
-                break
-            except IndexError:
-                pass
-
-    return run, camcol, field
-
-
 #==============================================================================
 # Coordinate converstions
 #==============================================================================
@@ -266,95 +229,67 @@ def dist(ra1, dec1, ra2, dec2):
     d2 = d1 * 180./np.pi
     return d2
 
-#==============================================================================
-# Main driver method
-#==============================================================================
 
-def main():
-
-    """Driver routine that calls the correct subroutine depending on catalog"""
-    ra, dec, radius, filename, catalog, band, hawki, regionname = get_options()
+def get_SDSS_runcamfield(ra, dec, release="dr14"):
+    """Retrieve run, camcol, field from SDSS."""
     ra, dec = sexa2deg(ra, dec)
-    lines = []
-    bandmatch = {'g': 'B', 'r':'R', 'i': 'I', 'z': 'I', 'u':'B', 'G':'R'}
+    pos = coords.SkyCoord(ra * u.deg, dec * u.deg, frame='fk5')
+    xid = SDSS.query_region(pos, radius = 1 * u.arcmin)
+    run, camcol, field = xid["run"], xid["camcol"], xid["field"]
 
-    if catalog == 'PS':
-        if ra < -30:
-            print("Couldn't query Pan-Starrs, falling back to SDSS")
-            catalog, band = 'SDSS', bandmatch[band]
-        else:
-            lines = get_PS(ra, dec, radius, band)
-            if lines == []:
-                print("Couldn't query Pan-STARRS, falling back to USNO")
-                catalog, band = 'USNO', bandmatch[band]
-
-    if catalog == 'SDSS':
-        run, camcol, field = get_SDSS_runcamfield(ra, dec)
-
-        if [run, camcol, field] == ['', '', '']:
-            if band in 'gri':
-                print("Not SDSS covered, trying APASS for GROND "+band)
-                catalog = 'APASS'
-        else:
-            print("SDSS covered, querying SDSS")
-            try:
-                lines = get_SDSS(ra, dec, radius, band)
-                print("SDSS query successfull, using SDSS")
-            except IOError:
-                print("Couldn't query SDSS, falling back to USNO")
-                catalog, band = 'USNO', bandmatch[band]
-
-    if catalog == 'APASS':
-        lines = get_Vizier(ra, dec, radius, band, catalog)
-        if lines == []:
-            print("Couldn't query APASS, falling back to USNO")
-            catalog, band = 'USNO', bandmatch[band]
-
-    if catalog == 'GAIA':
-        lines = get_Vizier(ra, dec, radius, band, catalog)
-        if lines == []:
-            print("Couldn't query Gaia, falling back to USNO")
-            catalog, band = 'USNO', bandmatch[band]
-
-    if catalog == 'DENIS':
-        lines = get_Vizier(ra, dec, radius, band, catalog)
-        if lines == []:
-             if band == 'I':
-                 print("DENIS did not return anything, trying USNO for "+band)
-                 catalog = 'USNO'
-             if band in 'JK':
-                 # If DENIS doesn't work, try USNO instead for NIR bands...
-                 print("DENIS did not return anything, trying 2MASS for "+band)
-                 catalog = '2MASS'
-
-    if catalog in ['USNO', '2MASS']:
-        lines = get_Vizier(ra, dec, radius, band, catalog)
-        if lines == []:
-            raise IOError('Could not retrieve Vizier catalog')
-        if hawki == 1:
-            maxmag = 20
-            for line in lines:
-                if float(line.split()[2]) < maxmag:
-                    maxra, maxdec = float(line.split()[0]), float(line.split()[1])
-                    maxmag = float(line.split()[2])
-    if regionname != None:
-        regionname.write('global color=red\n')
-        for line in lines:
-            line = line.split()
-            regionname.write("fk5; circle(%.6f,%.6f,4p)\n" \
-            %(float(line[0]), float(line[1])))
-        regionname.close()
+    return run, camcol, field
 
 
-    lines = ''.join(lines)
-    filename.write(lines)
-    filename.flush()
+def get_Vizier(ra, dec, radius, band, catalog):
 
-    print(catalog)
+    # Pick catalog according to band
+    if (band == 'G') and (catalog == 'GAIA'):
+        columns =  ['<Gmag>','_RAJ','_DEJ']
 
-    if hawki == 1:
-        print('Brightest source at %s with %.2f mag' %(deg2sexa(maxra, maxdec), maxmag))
-        print('Distance = %.1f arcmin' %(dist(ra, dec, maxra, maxdec)*60))
+    elif catalog == 'APASS':
+         columns =  ["%s'mag" %band, "e_%s'mag"%band]
+
+    elif (band == 'I') and (catalog == 'USNO'):
+        columns =  ['Imag']
+
+    elif band == 'R' and (catalog == 'USNO'):
+        columns =  ['R2mag']
+
+    elif band == 'B' and (catalog == 'USNO'):
+        columns =  ['B2mag']
+
+    elif band in 'JHK' and (catalog == '2MASS'):
+        bandstr = band +'mag'
+        banderr = 'e_'+bandstr
+        columns = [bandstr, banderr]
+
+    elif band == 'I' and (catalog == 'DENIS'):
+        bandstr = 'Imag'
+        banderr = 'e_'+bandstr
+        columns = [bandstr, banderr]
+
+    elif band in 'JK' and (catalog == 'DENIS'):
+        bandstr = band +'mag'
+        banderr = 'e_'+bandstr
+        columns = [bandstr, banderr]
+
+    pos = coords.SkyCoord(ra * u.deg, dec * u.deg, frame='fk5')
+    v = Vizier(columns=['_RAJ2000', '_DEJ2000'] + columns)
+    result = v.query_region(pos, radius=(float(radius)/60)*u.deg, catalog=catalog)
+    return result[result.keys()[0]]
+
+
+def get_SDSS(ra, dec, radius, band, release="dr14"):
+    """Retrieve object list from SDSS. Radius is in arcminutes."""
+    query_template = "select p.ra, p.dec, p.%s, p.Err_%s from STAR as p inner join dbo.fGetNearbyObjEq(%s,%s,%s) as N on p.objid = N.objid where ((p.flags & 0x10000000) != 0) AND ((p.flags & 0x8100000c00a4) = 0) AND (((p.flags & 0x400000000000) = 0) AND (p.psfmagerr_%s <= 0.18)) AND (((p.flags & 0x100000000000) = 0) or (p.flags & 0x1000) = 0)"
+    query = query_template % (band, band, ra, dec, radius, band)
+    result = SDSS.query_sql(query)
+
+    try:
+        result = SDSS.query_sql(query)
+    except:
+        raise RuntimeError("Could not run SDSS.query_sql")
+    return result
 
 
 def get_PS(ra, dec, radius, band, ndet=10):
@@ -401,275 +336,100 @@ def get_PS(ra, dec, radius, band, ndet=10):
         if len(p) == 4 and p[0] != '' and float(p[2]) > 0:
             output.append(p)
     result = ['\t'.join(x) for x in output]
+    # Convert output to astropy table
+    result = Table.read(result, format='ascii.tab')
     return result
 
 
-def get_SDSS(ra, dec, radius, band, release="dr12"):
-    """Retrieve object list from SDSS. Radius is in arcminutes. Try CAS
-    server and then Vizier mirrors."""
-    result = []
-    try:
-        result = get_SDSS_cas(ra, dec, radius, band, release)
-    except:
-        pass
+#==============================================================================
+# Main driver method
+#==============================================================================
 
-    if result == []:
-        result = get_SDSS_Vizier(ra, dec, radius, band)
-    return result
+def main():
 
+    """Driver routine that calls the correct subroutine depending on catalog"""
+    ra, dec, radius, filename, catalog, band, hawki, regionname = get_options()
+    ra, dec = sexa2deg(ra, dec)
+    lines = []
+    bandmatch = {'g': 'B', 'r':'R', 'i': 'I', 'z': 'I', 'u':'B', 'G':'R'}
 
-def get_Vizier(ra, dec, radius, band, catalog):
-    # VizieR mirrors
-    mirrors = [
-        'http://vizier.u-strasbg.fr/viz-bin/asu-tsv',
-        'http://vizier.cfa.harvard.edu/viz-bin/asu-tsv',
-        'http://vizier.nao.ac.jp/viz-bin/asu-tsv',
-        'http://vizier.hia.nrc.ca/viz-bin/asu-tsv',
-        'http://archive.ast.cam.ac.uk/viz-bin/asu-tsv',
-        'http://urania.iucaa.ernet.in/viz-bin/asu-tsv',
-        'http://data.bao.ac.cn/viz-bin/asu-tsv',
-        'http://www.ukirt.jach.hawaii.edu/viz-bin/asu-tsv']
-    if dec > 0: sign = '+'
-    else: sign = ''
-    # Common params
-    params = [('-to', '4'),
-        ('-from', '-2'),
-        ('-this', '-2'),
-        ('-out.max', '682666'),
-        ('-out.form', 'Tab-Separated-Values'),
-        ('-order', 'I'),
-        ('-c', '%.3f%s%.3f'%(ra,sign,dec)),
-        ('-c.eq', 'J2000'),
-        ('-oc.form', 'dec'),
-        ('-c.bm', '%sx%s'%(2*float(radius),2*float(radius))),
-        #('-c.u', 'arcmin'),
-        #('-c.geom', 'r'),
-        ('-sort', '_r'),
-        ('-out', 'RAJ2000'),
-        ('RAJ2000', ''),
-        ('-out', 'DEJ2000'),
-        ('DEJ2000', ''),
-        ('-file', '.'),
-        ('-meta', '2')]
+    if catalog == 'PS':
+        if ra < -30:
+            print("Couldn't query Pan-Starrs, falling back to SDSS")
+            catalog, band = 'SDSS', bandmatch[band]
+        else:
+            lines = get_PS(ra, dec, radius, band)
+            if lines == []:
+                print("Couldn't query Pan-STARRS, falling back to USNO")
+                catalog, band = 'USNO', bandmatch[band]
 
-    # Pick catalog according to band
-
-    if (band == 'G') and (catalog == 'GAIA'):
-        params +=  [('-source', 'I/337/gaia'),
-            ('-out', '<Gmag>'), ('<Gmag>', ''),
-            ('-out.add' ,'_RAJ,_DEJ')]
-
-    elif catalog == 'APASS':
-         params +=  [('-source', 'II/336/apass9'),
-            ('-out', "%s'mag" %band), ("%s'mag"%band, ''),
-            ('-out', "e_%s'mag"%band), ("e_%s'mag"%band, ''),
-            ]
-
-    elif (band == 'I') and (catalog == 'USNO'):
-        params +=  [('-source', 'I/284/out'),
-            ('-out', 'Imag'), ('Imag', '')]
-
-    elif band == 'R' and (catalog == 'USNO'):
-        params +=  [('-source', 'I/284/out'),
-            ('-out', 'R2mag'), ('R2mag', '')]
-
-    elif band == 'B' and (catalog == 'USNO'):
-        params +=  [('-source', 'I/284/out'),
-            ('-out', 'B2mag'), ('B2mag', '')]
-
-    elif band in 'JHK' and (catalog == '2MASS'):
-        bandstr = band +'mag'
-        banderr = 'e_'+bandstr
-        params += [('-source', 'II/246/out'),
-            ('-out', bandstr), (bandstr, ''),
-            ('-out', banderr), (banderr, '')]
-
-    elif band == 'I' and (catalog == 'DENIS'):
-        bandstr = 'Imag'
-        banderr = 'e_'+bandstr
-        params += [('-source', 'B/denis/denis'),
-            ('-out', bandstr), (bandstr, ''),
-            ('-out', banderr), (banderr, '')]
-
-    elif band in 'JK' and (catalog == 'DENIS'):
-        bandstr = band +'mag'
-        banderr = 'e_'+bandstr
-        params += [('-source', 'B/denis/denis'),
-            ('-out', bandstr), (bandstr, ''),
-            ('-out', banderr), (banderr, '')]
-
-    data = urllib.parse.urlencode(params, 1).encode("utf-8")
-    i, j, succ = 0, len(mirrors), 0
-
-    while i < j:
-        if succ == 0:
+    if catalog == 'SDSS':
+        run, camcol, field = get_SDSS_runcamfield(ra, dec)
+        if [run, camcol, field] == ['', '', '']:
+            if band in 'gri':
+                print("Not SDSS covered, trying APASS for GROND "+band)
+                catalog = 'APASS'
+        else:
+            print("SDSS covered, querying SDSS")
             try:
-                urlstring = "'%s?%s'" %(mirrors[i],data)
-                tmpfile = tempfile.mktemp('.tsv', 'usnob_data', '/tmp')
-                #os.system("wget -q -O %s %s" % (tmpfile,urlstring))
+                lines = get_SDSS(ra, dec, radius, band)
+                print("SDSS query successfull, using SDSS")
+            except IOError:
+                print("Couldn't query SDSS, falling back to USNO")
+                catalog, band = 'USNO', bandmatch[band]
 
-                cmd = "wget -q --timeout 20 --tries 1 -O %s %s" % (tmpfile,urlstring)
-#                print(urlstring
-                os.system(cmd)
-                tmpf = open(tmpfile)
-                content = tmpf.readlines()
-                tmpf.close()
-                os.remove(tmpfile)
-                if len(content) > 1:
-                    for c in content:
-                        if not c.startswith('#'):
-                            succ = 1
-            except (IOError, OSError):
-                t, v = sys.exc_info()[:2]
-                if i + 1 == j:
-                    sys.stderr.write('ERROR: %s: %s\n' % (t, v))
-                    sys.exit(-1)
-                else:
-                    sys.stderr.write('WARNING: %s: %s\n' % (t, v))
-        i += 1
-    lines = content
+    if catalog == 'APASS':
+        lines = get_Vizier(ra, dec, radius, band, catalog)
+        if isinstance(lines, list):
+            print("Couldn't query APASS, falling back to USNO")
+            catalog, band = 'USNO', bandmatch[band]
 
-    # skip headers
-    j, i = len(lines), 0
-    while i < j:
-        if lines[i].startswith('---'):
-            break
-        i += 1
-    i += 1
-    output = []
-    while i < j:
-        if lines[i][:3].strip() == '':
-            break
-        # Split by tabs, and strip individual columns.
-        L = map(lambda x: x.strip(), lines[i].split('\t'))
-        # If no magnitude is retrieved ignore this object.
-        if L[2] == '':
-            i += 1
-            continue
-        L.append('')
-        line = '\t'.join(L)
-        output.append(line+"\n")
-        i += 1
-    return output
+    if catalog == 'GAIA':
+        lines = get_Vizier(ra, dec, radius, band, catalog)
+        if isinstance(lines, list):
+            print("Couldn't query Gaia, falling back to USNO")
+            catalog, band = 'USNO', bandmatch[band]
 
-def get_SDSS_Vizier(ra, dec, radius, band, release = "dr9"):
-    """Retrive object list from SDSS. Use Vizier mirrors. ra and dec are
-    in degrees, radius is in arcminutes, band is one of (g,r,i,z,u),
-    release is always dr9 (V/139/sdss9) is used for the -source param).
-    """
-    # VizieR mirrors
-    mirrors = ['http://vizier.u-strasbg.fr/viz-bin/asu-tsv',
-        'http://vizier.nao.ac.jp/viz-bin/asu-tsv',
-        'http://vizier.hia.nrc.ca/viz-bin/asu-tsv',
-        'http://archive.ast.cam.ac.uk/viz-bin/asu-tsv',
-        'http://urania.iucaa.ernet.in/viz-bin/asu-tsv',
-        'http://data.bao.ac.cn/viz-bin/asu-tsv',
-        'http://vizier.cfa.harvard.edu/viz-bin/asu-tsv',
-        'http://www.ukirt.jach.hawaii.edu/viz-bin/asu-tsv']
+    if catalog == 'DENIS':
+        lines = get_Vizier(ra, dec, radius, band, catalog)
+        if isinstance(lines, list):
+             if band == 'I':
+                 print("DENIS did not return anything, trying USNO for "+band)
+                 catalog = 'USNO'
+             if band in 'JK':
+                 # If DENIS doesn't work, try USNO instead for NIR bands...
+                 print("DENIS did not return anything, trying 2MASS for "+band)
+                 catalog = '2MASS'
 
-    if dec > 0: sign = '+'
-    else: sign = ''
-    params = [('mode', 1),
-        ('cl', '6'),
-        ('-out.max', '682666'),
-        ('-out.form', 'Tab-Separated-Values'),
-        ('-order', 'I'),
-        ('-c', '%.3f%s%.3f'%(ra,sign,dec)),
-        ('-c.eq', 'J2000'),
-        ('-oc.form', 'dec'),
-        ('-c.bm', '%sx%s'%(2*float(radius),2*float(radius))),
-        ('-c.u', 'arcmin'),
-        #('-c.geom', 'r'),
-        ('-sort', '_r'),
-        #('-out', 'objID'),     # used in checking the outputs
-        ('-out', 'RAJ2000'),
-        ('RAJ2000', ''),
-        ('-out', 'DEJ2000'),
-        ('DEJ2000', ''),
-        ('-source', 'V/139/sdss9'),
-        ('-out', '%smag' % band),
-        ('-out', 'e_%smag' % band),
-        ('e_%spmag' % band, '<= 0.18'),
-        ('-out', '%ss' % band), # from the SQL query
-        ('-out', 'flags')]
+    if catalog in ['USNO', '2MASS']:
+        lines = get_Vizier(ra, dec, radius, band, catalog)
+        if isinstance(lines, list):
+            raise IOError('Could not retrieve Vizier catalog')
+        if hawki == 1:
+            maxmag = 20
+            for line in lines:
+                if float(line.split()[2]) < maxmag:
+                    maxra, maxdec = float(line.split()[0]), float(line.split()[1])
+                    maxmag = float(line.split()[2])
+    if regionname != None:
+        regionname.write('global color=green\n')
+        for line in lines:
+            # line = line.split()
+            regionname.write("fk5; circle(%.6f,%.6f,4p)\n" \
+            %(float(line[0]), float(line[1])))
+        regionname.close()
 
-    data  = urllib.parse.urlencode(params, 1).encode("utf-8")
-    n, i = len(mirrors), 0
-    saved_timeout = socket.setdefaulttimeout(20)
-    try:
-        while i < n:
-            url = mirrors[i]
-            try:
-                fp = urllib.request.urlopen(url, data)
-                lines = fp.readlines()
-                fp.close()
-                break
-            except (OSError, IOError):
-                t, v = sys.exc_info()[:2]
-                if i + 1 == n:
-                    sys.stderr.write('ERROR: %s: %s\n' % (t, v))
-                    sys.exit(1)
-                else:
-                    sys.stderr.write('WARNING: %s: %s\n' % (t, v))
-            i += 1
-    finally:
-        socket.setdefaulttimeout(saved_timeout)
 
-    # Skip headers
-    n, i = len(lines), 0
-    while i < n:
-        if lines[i].startswith('---'):
-            break
-        i+= 1
-    i += 1
-    lines = lines[i:]
-    # Filter using the masks in the original SQL query:
-    try:
-        output = []
-        i = 0
-        for p in lines:
-            p = p.split('\t')
-            try:
-                flags = int(p[-1], 16)  # hex
-            except:
-                continue
-            if (((flags & 0x10000000) != 0 and
-                (flags & 0x8100000c00a4) == 0 and
-                (flags & 0x400000000000) == 0 and
-                (flags & 0x400000000000) == 0 and
-                ((flags & 0x100000000000) == 0) or
-                   (flags & 0x1000) == 0)):
-             #           pass
-            #if int(p[-2]) == 1:
-                output.append(p[:-2])
-    except:
-        import traceback
-        traceback.print_exc()
-    # Join the columns back; The output is expected as a list of lines.
-    lines = ['\t'.join(x)+'\n' for x in output]
-    return lines
+    lines.write(filename, format='csv')
+    # lines = '\n'.join(lines)
+    # filename.write(lines)
+    # filename.flush()
 
-def get_SDSS_cas(ra, dec, radius, band, release="dr12"):
-    """Retrieve object list from SDSS. Radius is in arcminutes."""
-#    url = 'http://skyserver.sdss3.org/%s/en/tools/search/x_sql.asp' % (release)
-    url = "http://cas.sdss.org/dr9/en/tools/search/x_sql.asp" #% (release)
-    query_template = "select p.ra, p.dec, p.%s, p.Err_%s from STAR as p \
-inner join dbo.fGetNearbyObjEq(%s,%s,%s) as N on p.objid = N.objid \
-where ((p.flags & 0x10000000) != 0) \
-AND ((p.flags & 0x8100000c00a4) = 0) \
-AND (((p.flags & 0x400000000000) = 0) AND (p.psfmagerr_%s <= 0.18)) \
-AND (((p.flags & 0x100000000000) = 0) or (p.flags & 0x1000) = 0)"
-    query = query_template % (band, band, ra, dec, radius, band)
-    # To get also the magnitude error, add p.Err_%s to the select
-    # clause, and dchange the % string to (band, band, ...)
-    try:
-#        print("sqlcl.py -l -q \"%s\" -s %s -f csv" %(query,url)
-        result = os.popen("sqlcl.py -l -q \"%s\" -s %s -f csv" %(query,url)).readlines()
-        # Replace commas by tabs to match the USNO routine's output format
-        result = map(lambda l: l.replace(',','\t'),result)
-    except:
-        raise RuntimeError("Could not run sqlcl.py")
-    return result
+
+    if hawki == 1:
+        print('Brightest source at %s with %.2f mag' %(deg2sexa(maxra, maxdec), maxmag))
+        print('Distance = %.1f arcmin' %(dist(ra, dec, maxra, maxdec)*60))
+
 
 if __name__ == '__main__':
     main()
