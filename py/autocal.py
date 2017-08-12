@@ -24,6 +24,8 @@ from astropy.table import Table
 from scipy.spatial import cKDTree
 import to_precision as tp
 import pandas as pd
+from upper_limit import limiting_magnitude
+
 
 sexpath = ''  # if "sex" works in any directory, leave blank
 
@@ -82,7 +84,7 @@ def writeconfigfile(satlevel=55000.):
     #------------------------------ Photometry -----------------------------------
 
     PHOT_APERTURES   5              # MAG_APER aperture diameter(s) in pixels
-    PHOT_AUTOPARAMS  2.5, 3.5       # MAG_AUTO parameters: <Kron_fact>,<min_radius>
+    PHOT_AUTOPARAMS  3.5, 3.5       # MAG_AUTO parameters: <Kron_fact>,<min_radius>
     PHOT_PETROPARAMS 2.0, 3.5       # MAG_PETRO parameters: <Petrosian_fact>,
                                     # <min_radius>
 
@@ -455,10 +457,14 @@ def main():
     Rutine to automatically do astrometric calibration and photometry of detected sources. Uses astrometry.net to correct the astrometric solution of the image. Input images need to be larger than ~10 arcmin for this to work. This correction includes image distortions. Queries  Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Sextractor is run on the astrometrically calibrated image using the function sextract, heavily inspired by autoastrometry.py by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. Handling of the entire sextractor interfacing is heavily based on autoastrometry.py. The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog.
     """
 
-    filename = "../test_data/FORS_R_OB_ana.fits"
+    # filename = "../test_data/FORS_z_OB_ana.fits"
+    filename = "../test_data/GMOS_z_OB_ana.fits"
+    # # filename = "../test_data/XSHOO.2016-10-18T00_09_56.640.fits"
     # filename = "../test_data/XSHOO.2016-10-30T00_17_52.558.fits"
+
     fitsfile = fits.open(filename)
     header = fitsfile[0].header
+
     img_ra, img_dec = header["RA"], header["DEC"]
 
     # temp_filename = filename
@@ -515,7 +521,7 @@ def main():
     img_radius = np.sqrt((pixscale[0]*nxpix*60)**2 + (pixscale[1]*nypix*60)**2) # Largest image dimension to use as catalog query radius in arcmin
 
     # query catalog - will be moved to arg
-    catalog = "PS"
+    catalog = "SDSS"
 
     # Get the catalog sources
     if img_filt == "I":
@@ -541,7 +547,7 @@ def main():
     else:
       cat = get_catalog(img_ra, img_dec, img_filt, catalog=catalog, radius = img_radius)
 
-    # exit()
+
     # Prepare sextractor
     writeparfile()
     saturation = 30000
@@ -608,7 +614,7 @@ def main():
     zp = zp[mask]
     zp_m, zp_std = np.mean(zp), np.std(zp)
     zp_scatter = np.std(zp)
-    print(np.mean(zp), np.std(zp)/np.sqrt(len(zp)))
+    print(np.mean(zp), np.std(zp), np.std(zp)/np.sqrt(len(zp)))
     # mag = mag - np.mean(mag)
     # cat_mag = cat_mag - np.mean(cat_mag)
     # Fit for zero point
@@ -655,7 +661,7 @@ def main():
     pl.fill_between(x_fit, fit_up, fit_dw, alpha=.25, label='5-sigma interval')
     pl.legend()
     pl.savefig(filename+".pdf")
-
+    pl.close()
     # Add catalog photometry to sextractor object
     for ii, kk in enumerate(goodsexlist):
         kk.cat_mag = mag[ii] + zp_m
@@ -663,18 +669,41 @@ def main():
     writeregionfile('cal.im.reg', goodsexlist, 'red', 'img')
 
     # Get seeing fwhm for catalog object
-    fwhm = []
-    for ii in goodsexlist:
-        fwhm.append(ii.fwhm)
+    fwhm = np.zeros(len(goodsexlist))
+    for ii, kk in enumerate(goodsexlist):
+        fwhm[ii] = kk.fwhm
+
+    # Filtered mean and std
+    l_fwhm, m_fwhm, h_fwhm = np.percentile(fwhm, [16, 50, 84])
+    sig_l = m_fwhm - l_fwhm
+    sig_h = h_fwhm - m_fwhm
+    sigma_mask = 3
+    mask = (fwhm > m_fwhm - sigma_mask * sig_l) & (fwhm < m_fwhm + sigma_mask * sig_h)
+    fwhm = fwhm[mask]
+    fwhm, fwhm_std = np.mean(fwhm), np.std(fwhm)
+    print(fwhm, fwhm_std)
     # Median seeing in arcsec for sextractor
-    seeing_fwhm = np.percentile(fwhm, [50])*pixscale[0] * 3600 # Seeing in arcsec
+    seeing_fwhm = fwhm*pixscale[0] * 3600 # Seeing in arcsec
 
     try:
        # Sextract the image using the derived zero-point and fwhm!
-       subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-DETECT_THRESH', '1'])
+       subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-CHECKIMAGE_NAME', 'objfree_temp.fits, temp_back.fits, temp_aper.fits', '-CHECKIMAGE_TYPE', '-OBJECTS, BACKGROUND_RMS, APERTURES', '-DETECT_THRESH', '1'])
     except (OSError, IOError):
        logger.warn("Sextractor failed to be executed.", exc_info=1)
        sys.exit(1)
+
+    back_rms_image = fits.open("temp_back.fits")
+    l_rms, m_rms, h_rms = np.percentile(back_rms_image[0].data, [16, 50, 84])
+    sig_l = m_rms - l_rms
+    sig_h = h_rms - m_rms
+    sigma_mask = 3
+    mask = (back_rms_image[0].data > m_rms - sigma_mask * sig_l) & (back_rms_image[0].data < m_rms + sigma_mask * sig_h)
+    back_rms_image[0].data = back_rms_image[0].data[mask]
+    rms, rms_std = np.mean(back_rms_image[0].data), np.std(back_rms_image[0].data)
+    print(rms, rms_std)
+
+    print("Limiting magnitude")
+    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3))
 
     # Read in the sextractor catalog
     try:
