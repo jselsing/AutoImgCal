@@ -8,9 +8,10 @@ def limiting_magnitude(img_rms = 100, img_fwhm = 5, img_zp = 30, sigma_limit = 5
     from astropy.modeling import models
     from photutils import CircularAperture, aperture_photometry
     import numpy as np
+    np.random.seed(12345)
+
     # Generate image parameters
     tmp_amplitude = 1000
-
     aperture_radius = img_fwhm * (66/100)
     img_size = int(np.ceil(10 * img_fwhm / 2.) * 2)
     source_pos = [img_size/2, img_size/2]
@@ -18,7 +19,6 @@ def limiting_magnitude(img_rms = 100, img_fwhm = 5, img_zp = 30, sigma_limit = 5
     # Make synthetic sky with similar noise characteristics as observed image
     coviance = [[img_rms**2, 0], [0, img_rms**2]]
     sky = np.random.multivariate_normal([0, 0], coviance, [img_size, img_size])[:, :, 0]
-
 
     # Simulate source as either Gaussian or Moffat
     y, x = np.mgrid[:img_size, :img_size]

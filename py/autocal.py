@@ -4,7 +4,7 @@
 # Plotting
 import matplotlib; matplotlib.use('TkAgg')
 import matplotlib.pyplot as pl
-import seaborn; seaborn.set_style('ticks')
+# import seaborn; seaborn.set_style('ticks')
 
 # Imports
 import numpy as np
@@ -22,7 +22,6 @@ from astropy.io import fits
 from astropy import wcs
 from astropy.table import Table
 from scipy.spatial import cKDTree
-import to_precision as tp
 import pandas as pd
 from upper_limit import limiting_magnitude
 
@@ -457,30 +456,31 @@ def main():
     Rutine to automatically do astrometric calibration and photometry of detected sources. Uses astrometry.net to correct the astrometric solution of the image. Input images need to be larger than ~10 arcmin for this to work. This correction includes image distortions. Queries  Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Sextractor is run on the astrometrically calibrated image using the function sextract, heavily inspired by autoastrometry.py by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. Handling of the entire sextractor interfacing is heavily based on autoastrometry.py. The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog.
     """
 
-    # filename = "../test_data/FORS_z_OB_ana.fits"
-    filename = "../test_data/GMOS_z_OB_ana.fits"
+    filename = "../test_data/FORS_z_OB_ana.fits"
+    filename = "../test_data/frame-r-007917-5-0183.fits"
+    # filename = "../test_data/GMOS_z_OB_ana.fits"
     # # filename = "../test_data/XSHOO.2016-10-18T00_09_56.640.fits"
     # filename = "../test_data/XSHOO.2016-10-30T00_17_52.558.fits"
 
     fitsfile = fits.open(filename)
     header = fitsfile[0].header
 
-    img_ra, img_dec = header["RA"], header["DEC"]
+    img_ra, img_dec = header["CRVAL1"], header["CRVAL2"]
 
     # temp_filename = filename
     temp_filename = filename.replace("fits", "")+"temp"
 
     # Clean for cosmics
-    gain_key = [x for x in header.keys() if "GAIN" in x][0]
-    ron_key = [x for x in header.keys() if "RON" in x][0]
-
     try:
+      gain_key = [x for x in header.keys() if "GAIN" in x][0]
+      ron_key = [x for x in header.keys() if "RON" in x][0]
       gain = header[gain_key]
       ron = header[ron_key]
     except:
       logger.warn("Gain and RON keys not understood. Setting to default values")
       gain = 2
       ron = 3.3
+
     objlim = 75
     sigclip = 50 # Put this value quite high to avoid rejecting background regions
     crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, gain=gain, readnoise=ron, sigclip=sigclip, objlim=objlim, cleantype='medmask', sepmed=True, verbose=True)
@@ -508,7 +508,7 @@ def main():
         logger.warn("Filter keyword not recognized.", exc_info=1)
         sys.exit(1)
 
-    img_ra, img_dec = header["RA"], header["DEC"] # ra and dec
+    img_ra, img_dec = header["CRVAL1"], header["CRVAL2"] # ra and dec
     # Ensure sign convention for gr_cat
     if not img_dec < 0:
         img_dec = "+"+str(img_dec)
@@ -615,8 +615,7 @@ def main():
     zp_m, zp_std = np.mean(zp), np.std(zp)
     zp_scatter = np.std(zp)
     print(np.mean(zp), np.std(zp), np.std(zp)/np.sqrt(len(zp)))
-    # mag = mag - np.mean(mag)
-    # cat_mag = cat_mag - np.mean(cat_mag)
+
     # Fit for zero point
     from scipy.optimize import curve_fit
     from scipy import odr
@@ -702,9 +701,16 @@ def main():
     rms, rms_std = np.mean(back_rms_image[0].data), np.std(back_rms_image[0].data)
     print(rms, rms_std)
 
-    print("Limiting magnitude")
-    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3))
 
+    lim_mag = limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3)
+    print("Limiting magnitude")
+    print(lim_mag)
+    print(limiting_magnitude(img_rms = rms + 3 * rms_std, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3))
+    print(limiting_magnitude(img_rms = rms - 3 * rms_std, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3))
+    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm + 3 * fwhm_std, img_zp = zp_m, sigma_limit = 3))
+    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm - 3 * fwhm_std, img_zp = zp_m, sigma_limit = 3))
+    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m + 3 * zp_std, sigma_limit = 3))
+    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m - 3 * zp_std, sigma_limit = 3))
     # Read in the sextractor catalog
     try:
        cat = open("temp_sex_obj.cat",'r')
@@ -728,8 +734,14 @@ def main():
         sexlist.append(iobj)
     
     for ii, kk in enumerate(sexlist):
-        kk.cat_mag = kk.mag
-        kk.cat_magerr = np.sqrt(kk.magerr**2 + zp_std**2)
+        if kk.mag <= lim_mag:
+          kk.cat_mag = kk.mag
+          kk.cat_magerr = np.sqrt(kk.magerr**2 + zp_std**2)
+        elif kk.mag > lim_mag:
+          kk.cat_mag = lim_mag
+          kk.cat_magerr = 9.99
+        else:
+          sys.exit(1)
     writeregionfile('obj.im.reg', sexlist, 'red', 'img')
 
     try:
