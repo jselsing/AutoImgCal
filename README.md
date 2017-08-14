@@ -16,4 +16,4 @@ python dependencies
   - astropy: photutils
   - astropy: astroscrappy
   
-Additionally astrometry-net and sextractor are stand-alone packages that are required, but these can easily be install through homebrew. 
+Additionally Astrometry-net and Sextractor are stand-alone packages that are required, but these can easily be install through homebrew. Additionally, Astrometry-net needs index files which can be downloaded from http://data.astrometry.net/4200/ - please see the README for Astrometry-net at http://astrometry.net/doc/readme.html. Index files need to go in the Astrometry-net dir, e.g. /usr/local/Cellar/astrometry-net/HEAD-99d4344/data/.
