@@ -1,0 +1,12 @@
+print "\n"
+print "    Autocal v.0.5"
+print ""
+print "    by Jonatan Selsing"
+print ""
+print "    Dark Cosmology Centre"
+print "    Copenhagen University"
+print "    January 2017"
+print ""
+print ""
+print ""
+from autocal import autocal

@@ -230,11 +230,11 @@ def dist(ra1, dec1, ra2, dec2):
     return d2
 
 
-def get_SDSS_runcamfield(ra, dec, release="dr14"):
+def get_SDSS_runcamfield(ra, dec, radius, release=14):
     """Retrieve run, camcol, field from SDSS."""
     ra, dec = sexa2deg(ra, dec)
     pos = coords.SkyCoord(ra * u.deg, dec * u.deg, frame='fk5')
-    xid = SDSS.query_region(pos, radius = 1 * u.arcmin)
+    xid = SDSS.query_region(pos, radius = (float(radius)/60)*u.deg, data_release=release)
     run, camcol, field = xid["run"], xid["camcol"], xid["field"]
 
     return run, camcol, field
@@ -364,7 +364,7 @@ def main():
                 catalog, band = 'USNO', bandmatch[band]
 
     if catalog == 'SDSS':
-        run, camcol, field = get_SDSS_runcamfield(ra, dec)
+        run, camcol, field = get_SDSS_runcamfield(ra, dec, radius)
         if [run, camcol, field] == ['', '', '']:
             if band in 'gri':
                 print("Not SDSS covered, trying APASS for GROND "+band)

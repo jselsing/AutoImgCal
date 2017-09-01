@@ -15,6 +15,7 @@ import subprocess
 import os
 import glob
 import sys
+import getopt
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ def writeconfigfile(satlevel=55000.):
     ANALYSIS_THRESH  3              # <sigmas> or <threshold>,<ZP> in mag.arcsec-2
 
     FILTER           Y              # apply filter for detection (Y or N)?
-    FILTER_NAME      sex.conv       # name of the file containing the filter
+    FILTER_NAME      sex_temp.conv  # name of the file containing the filter
 
     DEBLEND_NTHRESH  16             # Number of deblending sub-thresholds
     DEBLEND_MINCONT  0.02           # Minimum contrast parameter for deblending
@@ -83,7 +84,7 @@ def writeconfigfile(satlevel=55000.):
     #------------------------------ Photometry -----------------------------------
 
     PHOT_APERTURES   5              # MAG_APER aperture diameter(s) in pixels
-    PHOT_AUTOPARAMS  3.5, 3.5       # MAG_AUTO parameters: <Kron_fact>,<min_radius>
+    PHOT_AUTOPARAMS  2.5, 3.5       # MAG_AUTO parameters: <Kron_fact>,<min_radius>
     PHOT_PETROPARAMS 2.0, 3.5       # MAG_PETRO parameters: <Petrosian_fact>,
                                     # <min_radius>
 
@@ -127,7 +128,7 @@ def writeconfigfile(satlevel=55000.):
     XML_NAME         sex.xml        # Filename for XML output
     '''
     #SATUR_LEVEL      '''+str(satlevel)+'''        # level (in ADUs) at which arises saturation
-    pf = open('sex.config','w')
+    pf = open('sex_temp.config','w')
     pf.write(configs)
     pf.close()
 
@@ -137,8 +138,8 @@ def writeconfigfile(satlevel=55000.):
     2 4 2
     1 2 1
     '''
-    if not os.path.exists('sex.conv'): 
-        cf = open('sex.conv','w')
+    if not os.path.exists('sex_temp.conv'): 
+        cf = open('sex_temp.conv','w')
         cf.write(convol)
         cf.close()
 
@@ -237,7 +238,7 @@ def sextract(sexfilename, nxpix, nypix, border=3, corner=12, minfwhm=1.5, maxfwh
 
     try:
        # Sextract the image !
-       subprocess.run(['sex', '%s'%sexfilename, '-c', 'sex.config', '-SATUR_LEVEL', '%s'%sexsaturation, '-MAG_ZEROPOINT', '%s'%zeropoint])
+       subprocess.run(['sex', '%s'%sexfilename, '-c', 'sex_temp.config', '-SATUR_LEVEL', '%s'%sexsaturation, '-MAG_ZEROPOINT', '%s'%zeropoint])
     except (OSError, IOError):
        logger.warn("Sextractor failed to be executed.", exc_info=1)
        sys.exit(1)
@@ -451,16 +452,12 @@ def joint_catalog(cat_1, cat_2):
     # Return joint lists
     return cat_1, cat_2
 
-def main():
+
+def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigclip = 50, objlim = 75, filter = None, cosmic_rejection = True, astrometry = True):
+
     """
     Rutine to automatically do astrometric calibration and photometry of detected sources. Uses astrometry.net to correct the astrometric solution of the image. Input images need to be larger than ~10 arcmin for this to work. This correction includes image distortions. Queries  Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Sextractor is run on the astrometrically calibrated image using the function sextract, heavily inspired by autoastrometry.py by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. Handling of the entire sextractor interfacing is heavily based on autoastrometry.py. The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog.
     """
-
-    filename = "../test_data/FORS_z_OB_ana.fits"
-    filename = "../test_data/frame-r-007917-5-0183.fits"
-    # filename = "../test_data/GMOS_z_OB_ana.fits"
-    # # filename = "../test_data/XSHOO.2016-10-18T00_09_56.640.fits"
-    # filename = "../test_data/XSHOO.2016-10-30T00_17_52.558.fits"
 
     fitsfile = fits.open(filename)
     header = fitsfile[0].header
@@ -470,10 +467,10 @@ def main():
     # temp_filename = filename
     temp_filename = filename.replace("fits", "")+"temp"
 
-    # Clean for cosmics
+    # Get gain and readnoise
     try:
       gain_key = [x for x in header.keys() if "GAIN" in x][0]
-      ron_key = [x for x in header.keys() if "RON" in x][0]
+      ron_key = [x for x in header.keys() if "RON" in x or "RDNOISE" in x][0]
       gain = header[gain_key]
       ron = header[ron_key]
     except:
@@ -481,32 +478,37 @@ def main():
       gain = 2
       ron = 3.3
 
-    objlim = 75
-    sigclip = 50 # Put this value quite high to avoid rejecting background regions
-    crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, gain=gain, readnoise=ron, sigclip=sigclip, objlim=objlim, cleantype='medmask', sepmed=True, verbose=True)
+    if cosmic_rejection:
+      # Clean for cosmics
+      crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, gain=gain, readnoise=ron, sigclip=sigclip, objlim=objlim, cleantype='medmask', sepmed=True, verbose=True)
 
-    # Replace data array with cleaned image
-    fitsfile[0].data = clean_arr/gain
+      # Replace data array with cleaned image
+      fitsfile[0].data = clean_arr/gain
 
     # Save cosmicced file to temp
     fitsfile.writeto(temp_filename, output_verify='fix', clobber=True)
 
     # Attempt astrometric calibration
-    temp_filename = run_astrometry_net(temp_filename, img_ra, img_dec)
+    if astrometry:
+      temp_filename = run_astrometry_net(temp_filename, img_ra, img_dec)
 
     # Read in cosmic-ray rejected, possibly astrometrically calibrated image
     fitsfile = fits.open(temp_filename)
     header = fitsfile[0].header
 
     # Get header keyword for catalog matching
-    try:
-      img_filt = header["HIERARCH ESO INS FILT1 NAME"][0] # image filter name
-    except KeyError:
+    if filter is None:
       try:
-        img_filt = header["FILTER"]
+        img_filt = header["HIERARCH ESO INS FILT1 NAME"][0] # image filter name
       except KeyError:
-        logger.warn("Filter keyword not recognized.", exc_info=1)
-        sys.exit(1)
+        try:
+          img_filt = header["FILTER"][0]
+        except KeyError:
+          try:
+            img_filt = header["NCFLTNM2"][0]
+          except KeyError:
+            logger.warn("Filter keyword not recognized.", exc_info=1)
+            sys.exit(1)
 
     img_ra, img_dec = header["CRVAL1"], header["CRVAL2"] # ra and dec
     # Ensure sign convention for gr_cat
@@ -519,9 +521,6 @@ def main():
     nypix = header['NAXIS2']
 
     img_radius = np.sqrt((pixscale[0]*nxpix*60)**2 + (pixscale[1]*nypix*60)**2) # Largest image dimension to use as catalog query radius in arcmin
-
-    # query catalog - will be moved to arg
-    catalog = "SDSS"
 
     # Get the catalog sources
     if img_filt == "I":
@@ -547,7 +546,7 @@ def main():
     else:
       cat = get_catalog(img_ra, img_dec, img_filt, catalog=catalog, radius = img_radius)
 
-
+    print(cat)
     # Prepare sextractor
     writeparfile()
     saturation = 30000
@@ -590,8 +589,8 @@ def main():
     for ii, kk in enumerate(idx_bad[::-1]):
         goodsexlist.pop(kk)
 
-    writetextfile('det.init.txt', goodsexlist)
-    writeregionfile('det.im.reg', goodsexlist, 'red', 'img')
+    # writetextfile('det.init.txt', goodsexlist)
+    writeregionfile(temp_filename+'.det.im.reg', goodsexlist, 'red', 'img')
 
     # Get sextracted magnitudes and equivalent catalog magnitudes
     n_good = len(goodsexlist)
@@ -604,6 +603,7 @@ def main():
 
     # Filter away 5-sigma outliers in the zero point
     zp = cat_mag - mag
+    # print(zp)
     zp_l, zp_m, zp_h = np.percentile(zp, [16, 50, 84])
 
     sig_l = zp_m - zp_l
@@ -665,14 +665,14 @@ def main():
     for ii, kk in enumerate(goodsexlist):
         kk.cat_mag = mag[ii] + zp_m
         kk.cat_magerr = np.sqrt(magerr[ii]**2 + zp_std**2)
-    writeregionfile('cal.im.reg', goodsexlist, 'red', 'img')
+    writeregionfile(temp_filename+'.cal.im.reg', goodsexlist, 'red', 'img')
 
     # Get seeing fwhm for catalog object
     fwhm = np.zeros(len(goodsexlist))
     for ii, kk in enumerate(goodsexlist):
         fwhm[ii] = kk.fwhm
 
-    # Filtered mean and std
+    # Filtered mean and std seeing FWHM in pixels
     l_fwhm, m_fwhm, h_fwhm = np.percentile(fwhm, [16, 50, 84])
     sig_l = m_fwhm - l_fwhm
     sig_h = h_fwhm - m_fwhm
@@ -680,18 +680,21 @@ def main():
     mask = (fwhm > m_fwhm - sigma_mask * sig_l) & (fwhm < m_fwhm + sigma_mask * sig_h)
     fwhm = fwhm[mask]
     fwhm, fwhm_std = np.mean(fwhm), np.std(fwhm)
-    print(fwhm, fwhm_std)
+
     # Median seeing in arcsec for sextractor
     seeing_fwhm = fwhm*pixscale[0] * 3600 # Seeing in arcsec
-
+    # gain = 1e4
     try:
        # Sextract the image using the derived zero-point and fwhm!
-       subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-CHECKIMAGE_NAME', 'objfree_temp.fits, temp_back.fits, temp_aper.fits', '-CHECKIMAGE_TYPE', '-OBJECTS, BACKGROUND_RMS, APERTURES', '-DETECT_THRESH', '1'])
+       subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex_temp.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-CHECKIMAGE_NAME', '%s_objfree.fits, %s_backrms.fits, %s_aper.fits'%(temp_filename, temp_filename, temp_filename), '-CHECKIMAGE_TYPE', '-OBJECTS, BACKGROUND_RMS, APERTURES', '-DETECT_THRESH', '3', '-BACK_SIZE', '64', '-BACK_FILTERSIZE', '3', '-DEBLEND_NTHRESH', '64', '-DEBLEND_MINCONT', '0.0001'])
     except (OSError, IOError):
        logger.warn("Sextractor failed to be executed.", exc_info=1)
        sys.exit(1)
 
-    back_rms_image = fits.open("temp_back.fits")
+
+
+    # From sextractors background rms image, get variance
+    back_rms_image = fits.open("%s_backrms.fits"%temp_filename)
     l_rms, m_rms, h_rms = np.percentile(back_rms_image[0].data, [16, 50, 84])
     sig_l = m_rms - l_rms
     sig_h = h_rms - m_rms
@@ -699,18 +702,17 @@ def main():
     mask = (back_rms_image[0].data > m_rms - sigma_mask * sig_l) & (back_rms_image[0].data < m_rms + sigma_mask * sig_h)
     back_rms_image[0].data = back_rms_image[0].data[mask]
     rms, rms_std = np.mean(back_rms_image[0].data), np.std(back_rms_image[0].data)
-    print(rms, rms_std)
 
 
-    lim_mag = limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3)
+
+    lim_mag = limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 5)
     print("Limiting magnitude")
     print(lim_mag)
-    print(limiting_magnitude(img_rms = rms + 3 * rms_std, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3))
-    print(limiting_magnitude(img_rms = rms - 3 * rms_std, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3))
-    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm + 3 * fwhm_std, img_zp = zp_m, sigma_limit = 3))
-    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm - 3 * fwhm_std, img_zp = zp_m, sigma_limit = 3))
-    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m + 3 * zp_std, sigma_limit = 3))
-    print(limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m - 3 * zp_std, sigma_limit = 3))
+
+    fin_img = fits.open('%s_aper.fits'%temp_filename)
+    fin_img[0].header["LIMMAG"] = lim_mag[0]
+    fin_img.writeto('%s_calibrated.fits'%temp_filename, clobber = True)
+
     # Read in the sextractor catalog
     try:
        cat = open("temp_sex_obj.cat",'r')
@@ -732,7 +734,7 @@ def main():
             continue
         iobj = SexObj(catlines[l]) #process the line into an object
         sexlist.append(iobj)
-    
+
     for ii, kk in enumerate(sexlist):
         if kk.mag <= lim_mag:
           kk.cat_mag = kk.mag
@@ -742,13 +744,36 @@ def main():
           kk.cat_magerr = 9.99
         else:
           sys.exit(1)
-    writeregionfile('obj.im.reg', sexlist, 'red', 'img')
+    writeregionfile(temp_filename+'.obj.im.reg', sexlist, 'red', 'img')
 
     try:
         for fl in glob.glob("*temp*"):
             os.remove(fl)
     except:
        print('Could not remove temp files for some reason')
+
+
+    try:
+        for fl in glob.glob("*temp*"):
+            os.remove(fl)
+    except:
+       print('Could not remove temp files for some reason')
+
+
+def main():
+
+
+
+    # gfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*g0*.fits")
+    # rfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*r0*.fits")
+    # ifilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*i0*.fits")
+    filelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/REDUCED_PHOT/*.fits")
+    # filelist = gfilelist + rfilelist + ifilelist + zfilelist
+    # print(filelist)
+    # exit()
+    for ii in filelist:
+      autocal(filename = ii, catalog = "2MASS", sigclip = 50, objlim = 75, cosmic_rejection = False, astrometry = True)
+
 
 if __name__ == '__main__':
     main()
