@@ -780,7 +780,7 @@ def main():
     # gfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*g0*.fits")
     # rfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*r0*.fits")
     # ifilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*i0*.fits")
-    filelist = glob.glob("/Users/jselsing/Work/etc/Christa/H/*.fits")
+    filelist = glob.glob("/Users/jselsing/Work/etc/Christa/J/*.fits")
     # filelist = gfilelist + rfilelist + ifilelist + zfilelist
     for ii in filelist:
       autocal(filename = ii, catalog = "2MASS", sigclip = 50, objlim = 75, cosmic_rejection = True, astrometry = True, tolerance = 1e-1, keep_temps = False)
