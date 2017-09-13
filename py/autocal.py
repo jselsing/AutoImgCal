@@ -548,7 +548,6 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
     else:
       cat = get_catalog(img_ra, img_dec, img_filt, catalog=catalog, radius = img_radius)
 
-    print(cat)
     # Prepare sextractor
     writeparfile()
     saturation = 30000
