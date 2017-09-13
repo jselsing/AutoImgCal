@@ -235,7 +235,10 @@ def get_SDSS_runcamfield(ra, dec, radius, release=14):
     ra, dec = sexa2deg(ra, dec)
     pos = coords.SkyCoord(ra * u.deg, dec * u.deg, frame='fk5')
     xid = SDSS.query_region(pos, radius = (float(radius)/60)*u.deg, data_release=release)
-    run, camcol, field = xid["run"], xid["camcol"], xid["field"]
+    try:
+        run, camcol, field = xid["run"], xid["camcol"], xid["field"]
+    except:
+        run, camcol, field = "", "", ""
 
     return run, camcol, field
 
