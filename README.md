@@ -3,7 +3,7 @@ Automatic astrometric - and flux calibration of astronomical images
 
 Rutine to automatically do astrometric calibration and photometry of detected sources. Uses Astrometry-net to correct the astrometric solution of the image. Input images need to be larger than ~10 arcmin for this to work. Queries Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with a modified version of gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Handling of the sextractor interfacing is inspired by autoastrometry.py, written by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog.
 
-## Depedencies
+## Dependencies
 
 We use a range of astronomical software packages for this, but mostly astropy- and astropy affiliated packages that can be easily installed using either conda or pip. 
 
