@@ -513,16 +513,23 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
 
 
     img_ra, img_dec = header["CRVAL1"], header["CRVAL2"] # ra and dec
+    # print(img_ra, img_dec)
+    img_ra, img_dec = header["OBJRA"], header["OBJDEC"] # ra and dec
+    # print(img_ra, img_dec)
+    # exit()
     # Ensure sign convention for gr_cat
     if not img_dec < 0:
         img_dec = "+"+str(img_dec)
 
     w = wcs.WCS(header)
     pixscale = wcs.utils.proj_plane_pixel_scales(w)
+    # print(pixscale)
     nxpix = header['NAXIS1']
     nypix = header['NAXIS2']
 
-    img_radius = np.sqrt((pixscale[0]*nxpix*60)**2 + (pixscale[1]*nypix*60)**2) # Largest image dimension to use as catalog query radius in arcmin
+    # print(pixscale*nxpix*60, nxpix, nypix)
+
+    img_radius = (1/4)*np.sqrt((pixscale[0]*nxpix*60)**2 + (pixscale[1]*nypix*60)**2) # Largest image dimension to use as catalog query radius in arcmin
 
     # Get the catalog sources
     if img_filt == "I":
@@ -547,6 +554,7 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
       cat = cat_r.copy()
     else:
       cat = get_catalog(img_ra, img_dec, img_filt, catalog=catalog, radius = img_radius)
+    cat[np.isnan(cat)] = 9.99
 
     # Prepare sextractor
     writeparfile()
@@ -555,6 +563,7 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
 
     # Sextract stars to produce image star catalog
     goodsexlist = sextract(temp_filename, nxpix, nypix, border = 3, corner = 12, saturation=saturation)
+
 
     # Get sextracted ra, dec list for k-d Tree algoritm
     ra_sex, dec_sex = [], []
@@ -573,11 +582,12 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
         # find the k nearest neighbours
         distance, indice = tree.query(kk[0:2], k=1)
         # print(distance, indice)
+        # print(ra_sex[indice], dec_sex[indice])
         if distance < tol:
             # Store
             idx_map_sex.append(indice)
             idx_map_cat.append(ii)
-
+    # exit()
 
     if len(idx_map_sex) == 0:
       print("No matching sources in catalog found within angular tolerance: "+str(tolerance))
@@ -586,6 +596,7 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
     elif len(idx_map_sex) != 0:
 
       # Add catalog photometry to sextractor object
+
       for ii, kk in enumerate(idx_map_sex):
           goodsexlist[kk].cat_mag = cat[idx_map_cat[ii]][2]
           goodsexlist[kk].cat_magerr = cat[idx_map_cat[ii]][3]
@@ -597,7 +608,7 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
       for ii, kk in enumerate(idx_bad[::-1]):
           goodsexlist.pop(kk)
 
-      # writetextfile('det.init.txt', goodsexlist)
+      
       writeregionfile(temp_filename+'.det.im.reg', goodsexlist, 'red', 'img')
 
       # Get sextracted magnitudes and equivalent catalog magnitudes
@@ -779,7 +790,9 @@ def main():
     # gfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*g0*.fits")
     # rfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*r0*.fits")
     # ifilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*i0*.fits")
-    filelist = glob.glob("/Users/jselsing/Work/etc/Christa/J/*.fits")
+    # filelist = glob.glob("../test_data/HAWKI_K_OB_ana.fits")
+    filelist = glob.glob("/Users/jselsing/Work/etc/Christa/H/*.fits")
+
     # filelist = gfilelist + rfilelist + ifilelist + zfilelist
     for ii in filelist:
       autocal(filename = ii, catalog = "2MASS", sigclip = 50, objlim = 75, cosmic_rejection = True, astrometry = True, tolerance = 1e-1, keep_temps = False)
