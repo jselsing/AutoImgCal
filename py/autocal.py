@@ -407,7 +407,9 @@ def get_catalog(img_ra, img_dec, img_filt, radius = 5, catalog = "PS"):
 
 def run_astrometry_net(img_name, img_ra, img_dec):
     # Shell command to run astrometry-net
-    astrometry_args = ['solve-field', '-g', '-p', '-O', '--fits-image', '%s'%(img_name), '--ra', '%s'%img_ra, '--dec', '%s'%img_dec, '--radius', '%s'%(1/60)]
+
+
+    astrometry_args = ['solve-field', '-g', '-p', '-O', '--fits-image', '%s'%(img_name), '--ra', '%s'%img_ra, '--dec', '%s'%img_dec, '--radius', '%s'%(1)]
 
     # Run astrometry-net on field
     try:
@@ -453,7 +455,7 @@ def joint_catalog(cat_1, cat_2):
     return cat_1, cat_2
 
 
-def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigclip = 50, objlim = 75, filter = None, cosmic_rejection = True, astrometry = True, tolerance = 1e-13, keep_temps=False):
+def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigclip = 50, objlim = 75, filter = None, cosmic_rejection = True, astrometry = True, tolerance = 1e-13, keep_temps=False, border_pixels = False):
 
     """
     Rutine to automatically do astrometric calibration and photometry of detected sources. Uses astrometry.net to correct the astrometric solution of the image. Input images need to be larger than ~10 arcmin for this to work. This correction includes image distortions. Queries  Pan-STARRS, SDSS and USNO in that order for coverage for reference photometry against which to do the calibration. This is achieved with gr_cat.py developed by Thomas Krühler which can be consulted for additional documentation. Sextractor is run on the astrometrically calibrated image using the function sextract, heavily inspired by autoastrometry.py by Daniel Perley and available at http://www.dark-cosmology.dk/~dperley/code/code.html. Handling of the entire sextractor interfacing is heavily based on autoastrometry.py. The two lists of images are then matched with a k-d tree algorithm and sextracted magntiudes can be calibrated against the chosen catalog.
@@ -461,6 +463,20 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
 
     fitsfile = fits.open(filename)
     header = fitsfile[0].header
+    try:
+      for ii in fitsfile[1].header:
+        header[ii] = fitsfile[1].header[ii]
+    except:
+      pass
+
+    # Mask specified edges in bad pixel map
+    # if border_pixels:
+    if type(border_pixels) != bool:
+        fitsfile[0].data[-border_pixels:, :] = np.nan
+        fitsfile[0].data[:, -border_pixels:] = np.nan
+        fitsfile[0].data[:border_pixels, :] = np.nan
+        fitsfile[0].data[:, :border_pixels] = np.nan
+    mask_array = np.isnan(fitsfile[0].data)
 
     img_ra, img_dec = header["CRVAL1"], header["CRVAL2"]
 
@@ -468,41 +484,57 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
     temp_filename = filename.replace("fits", "")+"temp"
 
     # Get gain and readnoise
+
     try:
       gain_key = [x for x in header.keys() if "GAIN" in x][0]
-      ron_key = [x for x in header.keys() if "RON" in x or "RDNOISE" in x][0]
       gain = header[gain_key]
+    except:
+      logger.warn("Gain akeys not understood. Setting to default values")
+      gain = 2
+
+    try:
+      ron_key = [x for x in header.keys() if "RON" in x or "RDNOISE" in x][0]
       ron = header[ron_key]
     except:
-      logger.warn("Gain and RON keys not understood. Setting to default values")
-      gain = 2
-      ron = 3.3
+      logger.warn("RON keys not understood. Setting to default values")
+      try:
+        conad_key = [x for x in header.keys() if "CONAD" in x][0]
+        ron = 1/header[conad_key]
+      except:
+        ron = 3.3
 
     if cosmic_rejection:
       # Clean for cosmics
-      crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, gain=gain, readnoise=ron, sigclip=sigclip, objlim=objlim, cleantype='medmask', sepmed=True, verbose=True)
+      crmask, clean_arr = astroscrappy.detect_cosmics(fitsfile[0].data, inmask = mask_array, gain=gain, readnoise=ron, sigclip=sigclip, objlim=objlim, cleantype='medmask', sepmed=True, verbose=True)
 
       # Replace data array with cleaned image
       fitsfile[0].data = clean_arr/gain
 
     # Save cosmicced file to temp
-    fitsfile.writeto(temp_filename, output_verify='fix', clobber=True)
+    fitsfile.writeto(temp_filename, output_verify='fix', overwrite=True)
 
     # Attempt astrometric calibration
     if astrometry:
       temp_filename = run_astrometry_net(temp_filename, img_ra, img_dec)
 
     # Read in cosmic-ray rejected, possibly astrometrically calibrated image
-    fitsfile = fits.open(temp_filename)
-    header = fitsfile[0].header
+    # fitsfile = fits.open(temp_filename)
+    # header = fitsfile[0].header
 
     # Get header keyword for catalog matching
-    filter_keys = ["HIERARCH ESO INS FILT1 NAME", "FILTER", "NCFLTNM2"]
+    filter_keys = ["HIERARCH ESO INS FILT1 NAME", "FILTER", "NCFLTNM2", "FAFLTNM", "STFLTNM", "ALFLTNM", "FILTER1", "FILTER2", "FILTER3", "FILTER4"]
     img_filt = None
     if filter is None:
       for fk in filter_keys:
         try:
-          img_filt = header[fk][0]
+          if header[fk] == "Open" or header[fk] == "OPEN" :
+            continue
+          if not header["TELESCOP"] == "GTC":
+            img_filt = header[fk][0]
+          elif not header["INSTRUME"] == "StanCam":
+            img_filt = header[fk][0]
+          elif header["TELESCOP"] == "GTC":
+            img_filt = header[fk][-1]
         except KeyError:
           continue
       try:
@@ -510,11 +542,10 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
       except NameError:
         logger.warn("Filter keyword not recognized.", exc_info=1)
         sys.exit(1)
-
-
+    print(img_filt)
     img_ra, img_dec = header["CRVAL1"], header["CRVAL2"] # ra and dec
     # print(img_ra, img_dec)
-    img_ra, img_dec = header["OBJRA"], header["OBJDEC"] # ra and dec
+    # img_ra, img_dec = header["OBJRA"], header["OBJDEC"] # ra and dec
     # print(img_ra, img_dec)
     # exit()
     # Ensure sign convention for gr_cat
@@ -524,6 +555,7 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
     w = wcs.WCS(header)
     pixscale = wcs.utils.proj_plane_pixel_scales(w)
     # print(pixscale)
+    # print(header)
     nxpix = header['NAXIS1']
     nypix = header['NAXIS2']
 
@@ -532,17 +564,28 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
     img_radius = (1/4)*np.sqrt((pixscale[0]*nxpix*60)**2 + (pixscale[1]*nypix*60)**2) # Largest image dimension to use as catalog query radius in arcmin
 
     # Get the catalog sources
-    if img_filt == "I":
+    if img_filt == "B" and not catalog =="APASS" and not catalog =="USNO":
       # Get sdss filters for Lupton (2005) tranformations - http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php
-      cat_i = get_catalog(img_ra, img_dec, "i", catalog=catalog, radius = img_radius)
-      cat_z = get_catalog(img_ra, img_dec, "z", catalog=catalog, radius = img_radius)
-      cat_i, cat_z = joint_catalog(cat_i, cat_z) # Get joint catalog
+      cat_g = get_catalog(img_ra, img_dec, "g", catalog=catalog, radius = img_radius)
+      cat_r = get_catalog(img_ra, img_dec, "r", catalog=catalog, radius = img_radius)
+      cat_g, cat_r = joint_catalog(cat_g, cat_r) # Get joint catalog
       # Do filter transformation
-      cat_i[:, 2] = cat_i[:, 2] - 0.3780*(cat_i[:, 2] - cat_z[:, 2]) - 0.3974
+
+      cat_g[:, 2] = cat_g[:, 2] + 0.3130*(cat_g[:, 2] - cat_r[:, 2]) + 0.2271
       # Account for transformation scatter
-      cat_i[:, 3] = np.sqrt(cat_i[:, 3]**2 + 0.0063**2)
-      cat = cat_i.copy()
-    elif img_filt == "R":
+      cat_g[:, 3] = np.sqrt(cat_g[:, 3]**2 + cat_r[:, 3]**2 + 0.0107**2)
+      cat = cat_g.copy()
+    elif img_filt == "V" and not catalog =="APASS":
+      # Get sdss filters for Lupton (2005) tranformations - http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php
+      cat_g = get_catalog(img_ra, img_dec, "g", catalog=catalog, radius = img_radius)
+      cat_r = get_catalog(img_ra, img_dec, "r", catalog=catalog, radius = img_radius)
+      cat_g, cat_r = joint_catalog(cat_g, cat_r) # Get joint catalog
+      # Do filter transformation
+      cat_g[:, 2] = cat_g[:, 2] - 0.5784*(cat_g[:, 2] - cat_r[:, 2]) + 0.0038
+      # Account for transformation scatter
+      cat_g[:, 3] = np.sqrt(cat_g[:, 3]**2 + cat_r[:, 3]**2 + 0.0054**2)
+      cat = cat_g.copy()
+    elif img_filt == "R" and not catalog =="USNO":
       # Get sdss filters for Lupton (2005) tranformations - http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php
       cat_r = get_catalog(img_ra, img_dec, "r", catalog=catalog, radius = img_radius)
       cat_i = get_catalog(img_ra, img_dec, "i", catalog=catalog, radius = img_radius)
@@ -552,17 +595,28 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
       # Account for transformation scatter
       cat_r[:, 3] = np.sqrt(cat_r[:, 3]**2 + 0.0072**2)
       cat = cat_r.copy()
+    elif img_filt == "I" and not catalog =="DENIS" and not catalog =="USNO":
+      # Get sdss filters for Lupton (2005) tranformations - http://www.sdss3.org/dr8/algorithms/sdssUBVRITransform.php
+      cat_i = get_catalog(img_ra, img_dec, "i", catalog=catalog, radius = img_radius)
+      cat_z = get_catalog(img_ra, img_dec, "z", catalog=catalog, radius = img_radius)
+      cat_i, cat_z = joint_catalog(cat_i, cat_z) # Get joint catalog
+      # Do filter transformation
+      cat_i[:, 2] = cat_i[:, 2] - 0.3780*(cat_i[:, 2] - cat_z[:, 2]) - 0.3974
+      # Account for transformation scatter
+      cat_i[:, 3] = np.sqrt(cat_i[:, 3]**2 + 0.0063**2)
+      cat = cat_i.copy()
+
     else:
       cat = get_catalog(img_ra, img_dec, img_filt, catalog=catalog, radius = img_radius)
     cat[np.isnan(cat)] = 9.99
 
     # Prepare sextractor
     writeparfile()
-    saturation = 30000
+    saturation = 3000000
     writeconfigfile(saturation)
 
     # Sextract stars to produce image star catalog
-    goodsexlist = sextract(temp_filename, nxpix, nypix, border = 3, corner = 12, saturation=saturation)
+    goodsexlist = sextract(temp_filename, nxpix, nypix, border = border_pixels, corner = 12, saturation=saturation)
 
 
     # Get sextracted ra, dec list for k-d Tree algoritm
@@ -590,180 +644,202 @@ def autocal(filename = "../test_data/FORS_R_OB_ana.fits", catalog = "SDSS", sigc
     # exit()
 
     if len(idx_map_sex) == 0:
-      print("No matching sources in catalog found within angular tolerance: "+str(tolerance))
-      print("Zero-point can therefore not be estimated. Try increasing tolerance.")
+        print("No matching sources in catalog found within angular tolerance: "+str(tolerance))
+        print("Zero-point can therefore not be estimated. Try increasing tolerance.")
 
     elif len(idx_map_sex) != 0:
 
-      # Add catalog photometry to sextractor object
+        # Add catalog photometry to sextractor object
+        for ii, kk in enumerate(idx_map_sex):
+            goodsexlist[kk].cat_mag = cat[idx_map_cat[ii]][2]
+            if not catalog == "USNO":
+                goodsexlist[kk].cat_magerr = cat[idx_map_cat[ii]][3]
+            elif catalog == "USNO":
+                goodsexlist[kk].cat_magerr = 0.1
 
-      for ii, kk in enumerate(idx_map_sex):
-          goodsexlist[kk].cat_mag = cat[idx_map_cat[ii]][2]
-          goodsexlist[kk].cat_magerr = cat[idx_map_cat[ii]][3]
+        # Bad matches from sextracted star catalog
+        idx_bad = [ii for ii in np.arange(len(goodsexlist)) if ii not in idx_map_sex]
 
-      # Bad matches from sextracted star catalog
-      idx_bad = [ii for ii in np.arange(len(goodsexlist)) if ii not in idx_map_sex]
+        # Remove mismatches
+        for ii, kk in enumerate(idx_bad[::-1]):
+            goodsexlist.pop(kk)
 
-      # Remove mismatches
-      for ii, kk in enumerate(idx_bad[::-1]):
-          goodsexlist.pop(kk)
+        
+        writeregionfile(temp_filename+'.det.im.reg', goodsexlist, 'red', 'img')
 
-      
-      writeregionfile(temp_filename+'.det.im.reg', goodsexlist, 'red', 'img')
+        # Get sextracted magnitudes and equivalent catalog magnitudes
+        n_good = len(goodsexlist)
+        mag, magerr, cat_mag, cat_magerr = np.zeros(n_good), np.zeros(n_good), np.zeros(n_good), np.zeros(n_good)
+        for ii, kk in enumerate(goodsexlist):
+            mag[ii] = kk.mag #+ 2.5*np.log10(exptime) # Correct for exposure time
+            magerr[ii] = kk.magerr
+            cat_mag[ii] = kk.cat_mag
+            cat_magerr[ii] = kk.cat_magerr
 
-      # Get sextracted magnitudes and equivalent catalog magnitudes
-      n_good = len(goodsexlist)
-      mag, magerr, cat_mag, cat_magerr = np.zeros(n_good), np.zeros(n_good), np.zeros(n_good), np.zeros(n_good)
-      for ii, kk in enumerate(goodsexlist):
-          mag[ii] = kk.mag #+ 2.5*np.log10(exptime) # Correct for exposure time
-          magerr[ii] = kk.magerr
-          cat_mag[ii] = kk.cat_mag
-          cat_magerr[ii] = kk.cat_magerr
+        # Filter away 5-sigma outliers in the zero point
+        zp = cat_mag - mag
 
-      # Filter away 5-sigma outliers in the zero point
-      zp = cat_mag - mag
+        if len(zp) == 1:
+          zp_m = zp
+          zp_std = np.sqrt(cat_magerr**2 - magerr**2)
+        elif not len(zp) == 1:
+          zp_l, zp_m, zp_h = np.nanpercentile(zp, [16, 50, 84])
 
-      zp_l, zp_m, zp_h = np.percentile(zp, [16, 50, 84])
+          sig_l = zp_m - zp_l
+          sig_h = zp_h - zp_m
+          # Filter zp's
+          sigma_mask = 3
+          mask = (zp > zp_m - sigma_mask * sig_l) & (zp < zp_m + sigma_mask * sig_h) & (cat_magerr != 0.0)
+          zp = zp[mask]
+          zp_m, zp_std = np.mean(zp), np.std(zp)
+          zp_scatter = np.std(zp)
+          print(np.mean(zp), np.std(zp), np.std(zp)/np.sqrt(len(zp)))
 
-      sig_l = zp_m - zp_l
-      sig_h = zp_h - zp_m
-      # Filter zp's
-      sigma_mask = 3
-      mask = (zp > zp_m - sigma_mask * sig_l) & (zp < zp_m + sigma_mask * sig_h)
-      zp = zp[mask]
-      zp_m, zp_std = np.mean(zp), np.std(zp)
-      zp_scatter = np.std(zp)
-      print(np.mean(zp), np.std(zp), np.std(zp)/np.sqrt(len(zp)))
+          # Fit for zero point
+          from scipy.optimize import curve_fit
+          from scipy import odr
 
-      # Fit for zero point
-      from scipy.optimize import curve_fit
-      from scipy import odr
+          def func(p, x):
+            b = p
+            return x + b
 
-      def func(p, x):
-        b = p
-        return x + b
+          # Model object
+          lin_model = odr.Model(func)
 
-      # Model object
-      lin_model = odr.Model(func)
+          # Create a RealData object
+          data = odr.RealData(mag[mask], cat_mag[mask], sx=magerr[mask], sy=cat_magerr[mask])
 
-      # Create a RealData object
-      data = odr.RealData(mag[mask], cat_mag[mask], sx=magerr[mask], sy=cat_magerr[mask])
+          # Set up ODR with the model and data.
+          odr = odr.ODR(data, lin_model, beta0=[np.mean(zp)])
 
-      # Set up ODR with the model and data.
-      odr = odr.ODR(data, lin_model, beta0=[np.mean(zp)])
+          # Run the regression.
+          out = odr.run()
 
-      # Run the regression.
-      out = odr.run()
+          #print fit parameters and 1-sigma estimates
+          popt = out.beta
+          perr = out.sd_beta
+          print('fit parameter 1-sigma error')
+          print('———————————-')
+          for i in range(len(popt)):
+            print(str(popt[i])+' +- '+str(perr[i]))
+          zp_m, zp_std = popt[0], perr[0]
+          # prepare confidence level curves
+          nstd = 5. # to draw 5-sigma intervals
+          popt_up = popt + nstd * perr
+          popt_dw = popt - nstd * perr
 
-      #print fit parameters and 1-sigma estimates
-      popt = out.beta
-      perr = out.sd_beta
-      print('fit parameter 1-sigma error')
-      print('———————————-')
-      for i in range(len(popt)):
-        print(str(popt[i])+' +- '+str(perr[i]))
-      zp_m, zp_std = popt[0], perr[0]
-      # prepare confidence level curves
-      nstd = 5. # to draw 5-sigma intervals
-      popt_up = popt + nstd * perr
-      popt_dw = popt - nstd * perr
+          x_fit = np.linspace(min(mag[mask]), max(mag[mask]), 100)
+          fit = func(popt, x_fit)
+          fit_up = func(popt_up, x_fit)
+          fit_dw= func(popt_dw, x_fit)
 
-      x_fit = np.linspace(min(mag[mask]), max(mag[mask]), 100)
-      fit = func(popt, x_fit)
-      fit_up = func(popt_up, x_fit)
-      fit_dw= func(popt_dw, x_fit)
+          #plot
+          pl.errorbar(mag[mask], cat_mag[mask], xerr=magerr[mask], yerr=cat_magerr[mask], fmt = 'k.', label = str(zp_m)+' +- '+str(zp_std))
+          pl.plot(x_fit, fit, lw=2, label='best fit curve')
+          pl.fill_between(x_fit, fit_up, fit_dw, alpha=.25, label='5-sigma interval')
+          pl.legend()
+          pl.savefig(filename.replace(".fits", "")+"_zeropoint.pdf")
+          pl.close()
 
-      #plot
-      pl.errorbar(mag[mask], cat_mag[mask], xerr=magerr[mask], yerr=cat_magerr[mask], fmt = 'k.', label = str(zp_m)+' +- '+str(zp_std))
-      pl.plot(x_fit, fit, lw=2, label='best fit curve')
-      pl.fill_between(x_fit, fit_up, fit_dw, alpha=.25, label='5-sigma interval')
-      pl.legend()
-      pl.savefig(filename.replace(".fits", "")+"_zeropoint.pdf")
-      pl.close()
-      # Add catalog photometry to sextractor object
-      for ii, kk in enumerate(goodsexlist):
-          kk.cat_mag = mag[ii] + zp_m
-          kk.cat_magerr = np.sqrt(magerr[ii]**2 + zp_std**2)
-      writeregionfile(temp_filename+'.cal.im.reg', goodsexlist, 'red', 'img')
+        print("Image zeropoint")
+        print(zp_m)
+        # Add catalog photometry to sextractor object
+        for ii, kk in enumerate(goodsexlist):
+            kk.cat_mag = mag[ii] + zp_m
+            kk.cat_magerr = np.sqrt(magerr[ii]**2 + zp_std**2)
+        writeregionfile(temp_filename+'.cal.im.reg', goodsexlist, 'red', 'img')
 
-      # Get seeing fwhm for catalog object
-      fwhm = np.zeros(len(goodsexlist))
-      for ii, kk in enumerate(goodsexlist):
-          fwhm[ii] = kk.fwhm
+        # Get seeing fwhm for catalog object
+        fwhm = np.zeros(len(goodsexlist))
+        for ii, kk in enumerate(goodsexlist):
+            fwhm[ii] = kk.fwhm
 
-      # Filtered mean and std seeing FWHM in pixels
-      l_fwhm, m_fwhm, h_fwhm = np.percentile(fwhm, [16, 50, 84])
-      sig_l = m_fwhm - l_fwhm
-      sig_h = h_fwhm - m_fwhm
-      sigma_mask = 3
-      mask = (fwhm > m_fwhm - sigma_mask * sig_l) & (fwhm < m_fwhm + sigma_mask * sig_h)
-      fwhm = fwhm[mask]
-      fwhm, fwhm_std = np.mean(fwhm), np.std(fwhm)
+        if len(fwhm) == 1:
+          fwhm = fwhm
+          fwhm_std = 0.1
+        elif not len(fwhm) == 1:
 
-      # Median seeing in arcsec for sextractor
-      seeing_fwhm = fwhm*pixscale[0] * 3600 # Seeing in arcsec
-      # gain = 1e4
-      try:
-         # Sextract the image using the derived zero-point and fwhm!
-         subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex_temp.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-CHECKIMAGE_NAME', '%s_objfree, %s_backrms, %s_aper'%(temp_filename, temp_filename, temp_filename), '-CHECKIMAGE_TYPE', '-OBJECTS, BACKGROUND_RMS, APERTURES', '-DETECT_THRESH', '3', '-BACK_SIZE', '64', '-BACK_FILTERSIZE', '3', '-DEBLEND_NTHRESH', '64', '-DEBLEND_MINCONT', '0.0001'])
-      except (OSError, IOError):
-         logger.warn("Sextractor failed to be executed.", exc_info=1)
-         sys.exit(1)
+          # Filtered mean and std seeing FWHM in pixels
+          l_fwhm, m_fwhm, h_fwhm = np.percentile(fwhm, [16, 50, 84])
+          sig_l = m_fwhm - l_fwhm
+          sig_h = h_fwhm - m_fwhm
+          sigma_mask = 3
+          mask = (fwhm > m_fwhm - sigma_mask * sig_l) & (fwhm < m_fwhm + sigma_mask * sig_h)
+          fwhm = fwhm[mask]
+          fwhm, fwhm_std = np.mean(fwhm), np.std(fwhm)
 
-
-
-      # From sextractors background rms image, get variance
-      back_rms_image = fits.open("%s_backrms"%temp_filename)
-      l_rms, m_rms, h_rms = np.percentile(back_rms_image[0].data, [16, 50, 84])
-      sig_l = m_rms - l_rms
-      sig_h = h_rms - m_rms
-      sigma_mask = 3
-      mask = (back_rms_image[0].data > m_rms - sigma_mask * sig_l) & (back_rms_image[0].data < m_rms + sigma_mask * sig_h)
-      back_rms_image[0].data = back_rms_image[0].data[mask]
-      rms, rms_std = np.mean(back_rms_image[0].data), np.std(back_rms_image[0].data)
+        # Median seeing in arcsec for sextractor
+        seeing_fwhm = fwhm*pixscale[0] * 3600 # Seeing in arcsec
+        print("Image seeing FWHM")
+        print(seeing_fwhm)
+        gain = 1e4
+        try:
+           # Sextract the image using the derived zero-point and fwhm!
+           subprocess.run(['sex', '%s'%temp_filename, '-c', 'sex_temp.config', '-SEEING_FWHM', '%s'%seeing_fwhm, '-SATUR_LEVEL', '%s'%saturation, '-MAG_ZEROPOINT', '%s'%zp_m, '-CATALOG_NAME', 'temp_sex_obj.cat', '-GAIN', '%s'%gain, '-CHECKIMAGE_NAME', '%s_objfree, %s_backrms, %s_aper'%(temp_filename, temp_filename, temp_filename), '-CHECKIMAGE_TYPE', '-OBJECTS, BACKGROUND_RMS, APERTURES', '-DETECT_THRESH', '2', '-BACK_SIZE', '32', '-BACK_FILTERSIZE', '9', '-DEBLEND_NTHRESH', '32', '-DEBLEND_MINCONT', '0.001'])
+        except (OSError, IOError):
+           logger.warn("Sextractor failed to be executed.", exc_info=1)
+           sys.exit(1)
 
 
 
-      lim_mag = limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 5)
-      print("Limiting magnitude")
-      print(lim_mag)
+        # From sextractors background rms image, get variance
+        back_rms_image = fits.open("%s_backrms"%temp_filename)
+        l_rms, m_rms, h_rms = np.nanpercentile(back_rms_image[0].data, [16, 50, 84])
+        sig_l = m_rms - l_rms
+        sig_h = h_rms - m_rms
+        sigma_mask = 3
+        mask = (back_rms_image[0].data > m_rms - sigma_mask * sig_l) & (back_rms_image[0].data < m_rms + sigma_mask * sig_h)
+        back_rms_image[0].data = back_rms_image[0].data[mask]
+        rms, rms_std = np.nanmean(back_rms_image[0].data), np.nanstd(back_rms_image[0].data)
 
-      fin_img = fits.open('%s_aper'%temp_filename)
-      fin_img[0].header["LIMMAG"] = lim_mag[0]
-      fin_img.writeto('%s_calibrated.fits'%filename.replace(".fits", ""), clobber = True)
 
-      # Read in the sextractor catalog
-      try:
-         cat = open("temp_sex_obj.cat",'r')
-         catlines = cat.readlines()
-         cat.close()
-      except:
-          logger.warn("Cannot load sextractor output file!", exc_info=1)
-          sys.exit(1)
 
-      if len(catlines) == 0:
-          logger.warn("Sextractor catalog is empty: try a different catalog?", exc_info=1)
-          sys.exit(1)
+        lim_mag = limiting_magnitude(img_rms = rms, img_fwhm = fwhm, img_zp = zp_m, sigma_limit = 3)
+        print("Limiting magnitude")
+        print(lim_mag)
 
-      l = -1
-      sexlist = []
-      while l < len(catlines)-1:
-          l += 1
-          if (len(catlines[l]) <= 1 or catlines[l][0] == '#'):
-              continue
-          iobj = SexObj(catlines[l]) #process the line into an object
-          sexlist.append(iobj)
+        fin_img = fits.open('%s_aper'%temp_filename)
+        fin_img[0].header["LIMMAG"] = lim_mag[0]
 
-      for ii, kk in enumerate(sexlist):
-          if kk.mag <= lim_mag:
-            kk.cat_mag = kk.mag
-            kk.cat_magerr = np.sqrt(kk.magerr**2 + zp_std**2)
-          elif kk.mag > lim_mag:
-            kk.cat_mag = lim_mag
-            kk.cat_magerr = 9.99
-          else:
+        fin_img[0].data[-border_pixels:, :] = np.nan
+        fin_img[0].data[:, -border_pixels:] = np.nan
+        fin_img[0].data[:border_pixels, :] = np.nan
+        fin_img[0].data[:, :border_pixels] = np.nan
+
+        fin_img.writeto('%s_calibrated.fits'%filename.replace(".fits", ""), overwrite = True)
+
+        # Read in the sextractor catalog
+        try:
+           cat = open("temp_sex_obj.cat",'r')
+           catlines = cat.readlines()
+           cat.close()
+        except:
+            logger.warn("Cannot load sextractor output file!", exc_info=1)
             sys.exit(1)
-      writeregionfile('%s_obj_im.reg'%filename.replace(".fits", ""), sexlist, 'red', 'img')
+
+        if len(catlines) == 0:
+            logger.warn("Sextractor catalog is empty: try a different catalog?", exc_info=1)
+            sys.exit(1)
+
+        l = -1
+        sexlist = []
+        while l < len(catlines)-1:
+            l += 1
+            if (len(catlines[l]) <= 1 or catlines[l][0] == '#'):
+                continue
+            iobj = SexObj(catlines[l]) #process the line into an object
+            sexlist.append(iobj)
+
+        for ii, kk in enumerate(sexlist):
+            if kk.mag <= lim_mag:
+              kk.cat_mag = kk.mag
+              kk.cat_magerr = np.sqrt(kk.magerr**2 + zp_std**2)
+            elif kk.mag > lim_mag:
+              kk.cat_mag = lim_mag
+              kk.cat_magerr = 9.99
+            else:
+              sys.exit(1)
+        writeregionfile('%s_obj_im.reg'%filename.replace(".fits", ""), sexlist, 'red', 'img')
 
     try:
         for fl in glob.glob("*temp*"):
@@ -790,12 +866,18 @@ def main():
     # gfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*g0*.fits")
     # rfilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*r0*.fits")
     # ifilelist = glob.glob("/Users/jselsing/Dropbox/SN2017eaw_PHOT/ALFOSC/*i0*.fits")
-    # filelist = glob.glob("../test_data/HAWKI_K_OB_ana.fits")
-    filelist = glob.glob("/Users/jselsing/Work/etc/Christa/H/*.fits")
+
+    # filelist = glob.glob("/Users/jselsing/Downloads/*SDSS.fits")
+    # /Users/jselsing/Downloads/tmp/
+    # filelist = glob.glob("/Users/jselsing/Downloads/tmp/*.fits")
+    filelist = glob.glob("/Users/jselsing/Work/work_rawDATA/r.HAWKI.2018-08-06T05:38:28.379_tpl-A01_0045.fits")
+    print(filelist)
+    # filelist = [ii for ii in filelist if "calibrated" not in ii]
 
     # filelist = gfilelist + rfilelist + ifilelist + zfilelist
     for ii in filelist:
-      autocal(filename = ii, catalog = "2MASS", sigclip = 50, objlim = 75, cosmic_rejection = True, astrometry = True, tolerance = 1e-1, keep_temps = False)
+      print(ii)
+      autocal(filename = ii, catalog = "SDSS", sigclip = 50, objlim = 75, cosmic_rejection = True, astrometry = True, tolerance = 1e-3, keep_temps = False, border_pixels = False)
 
 
 if __name__ == '__main__':

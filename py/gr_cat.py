@@ -250,16 +250,18 @@ def get_Vizier(ra, dec, radius, band, catalog):
         columns =  ['<Gmag>','_RAJ','_DEJ']
 
     elif catalog == 'APASS':
-         columns =  ["%s'mag" %band, "e_%s'mag"%band]
+        bandstr = "%s_mag"%band
+        banderr = "e_%s_mag"%band
+        columns = [bandstr, banderr]
 
     elif (band == 'I') and (catalog == 'USNO'):
         columns =  ['Imag']
 
     elif band == 'R' and (catalog == 'USNO'):
-        columns =  ['R2mag']
+        columns =  ['Rmag']
 
     elif band == 'B' and (catalog == 'USNO'):
-        columns =  ['B2mag']
+        columns =  ['Bmag']
 
     elif band in 'JHK' and (catalog == '2MASS'):
         bandstr = band +'mag'
@@ -277,8 +279,17 @@ def get_Vizier(ra, dec, radius, band, catalog):
         columns = [bandstr, banderr]
 
     pos = coords.SkyCoord(ra * u.deg, dec * u.deg, frame='fk5')
+
     v = Vizier(columns=['_RAJ2000', '_DEJ2000'] + columns)
+
+    # Test to see catalog content and column names
+    results = Vizier.query_constraints(catalog=catalog)
+    # print(results[results.keys()[0]].keys())
+    # print(catalog, band)
+    # exit()
+
     result = v.query_region(pos, radius=(float(radius)/60)*u.deg, catalog=catalog)
+    # print(result[result.keys()[0]])
     return result[result.keys()[0]]
 
 
